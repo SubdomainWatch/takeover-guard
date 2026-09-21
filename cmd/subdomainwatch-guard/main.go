@@ -14,6 +14,7 @@ import (
 	"github.com/subdomainwatch/takeover-guard/pkg/override"
 	"github.com/subdomainwatch/takeover-guard/pkg/prober"
 	"github.com/subdomainwatch/takeover-guard/pkg/reporter"
+	"github.com/subdomainwatch/takeover-guard/pkg/syncer"
 )
 
 func main() {
@@ -29,6 +30,7 @@ func main() {
 		offlineOnly     bool
 		signaturesURL   string
 		localMode       bool
+		syncURL         string
 	)
 
 	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON")
@@ -42,6 +44,7 @@ func main() {
 	flag.BoolVar(&offlineOnly, "offline-only", false, "Force offline embedded signatures bundle")
 	flag.StringVar(&signaturesURL, "signatures-url", "", "Custom remote URL for verified signatures")
 	flag.BoolVar(&localMode, "local", false, "Run local developer pre-commit engine across .tf files")
+	flag.StringVar(&syncURL, "sync-url", "", "SubdomainWatch SaaS sync endpoint (default: https://subdomainwatch.com/api/guard/sync)")
 	flag.Parse()
 
 	// Environment variable overrides (from GitHub Actions env)
@@ -208,6 +211,45 @@ func main() {
 		if shouldFail {
 			break
 		}
+	}
+
+	// 7. Sync Telemetry to SubdomainWatch SaaS (§10 Phase 3)
+	apiKey := os.Getenv("SUBDOMAINWATCH_API_KEY")
+	if apiKey != "" {
+		envInfo := syncer.DetectEnvironment()
+		status := "passed"
+		if shouldFail {
+			status = "failed"
+		} else if len(activeFindings) > 0 {
+			status = "warned"
+		}
+
+		var overrideList []syncer.OverridePayload
+		for domain, snippet := range overrideSnippets {
+			overrideList = append(overrideList, syncer.OverridePayload{
+				Domain: domain,
+				Reason: snippet,
+			})
+		}
+
+		syncPayload := &syncer.SyncPayload{
+			Repository:           envInfo.Repository,
+			Branch:               envInfo.Branch,
+			CommitSHA:            envInfo.CommitSHA,
+			PRNumber:             envInfo.PRNumber,
+			Mode:                 mode,
+			ToolVersion:          "2.1.0",
+			Timestamp:            time.Now().UTC().Format(time.RFC3339),
+			Status:               status,
+			TotalModifiedRecords: totalModified,
+			CriticalCount:        summary.CriticalCount,
+			HighCount:            summary.HighCount,
+			WarningCount:         summary.WarningCount,
+			Findings:             activeFindings,
+			Overrides:            overrideList,
+		}
+
+		_ = syncer.SyncTelemetry(ctx, syncURL, apiKey, syncPayload)
 	}
 
 	if shouldFail {
