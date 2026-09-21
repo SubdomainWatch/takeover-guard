@@ -73,3 +73,16 @@ func PrintBudgetExceeded(w io.Writer, count, max int) {
 	fmt.Fprintf(w, "Plan contains %s%d%s modified DNS records, exceeding the %d performance budget cap.\n", colorBold, count, colorReset, max)
 	fmt.Fprintf(w, "To maintain fast CI SLA, scope execution with path filtering: %spaths: [\"terraform/dns/**\"]%s\n\n", strings.TrimSpace(colorCyan), colorReset)
 }
+
+func PrintSnippets(w io.Writer, snippets map[string]string) {
+	if len(snippets) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "%s💡 PRE-COMMIT OVERRIDE ASSISTANT:%s\n", colorCyan, colorReset)
+	fmt.Fprintf(w, "  If an accepted business risk exists, paste the comment directly above the resource block (line N-1):\n\n")
+	for fqdn, snippet := range snippets {
+		fmt.Fprintf(w, "  %s%s:%s\n", colorBold, fqdn, colorReset)
+		fmt.Fprintf(w, "    %s%s%s\n\n", colorYellow, snippet, colorReset)
+	}
+}
+
