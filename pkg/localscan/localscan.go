@@ -16,15 +16,17 @@ import (
 )
 
 var (
-	route53RecordRegex = regexp.MustCompile(`(?i)^\s*resource\s+"aws_route53_record"\s+"([^"]+)"`)
+	route53RecordRegex    = regexp.MustCompile(`(?i)^\s*resource\s+"aws_route53_record"\s+"([^"]+)"`)
 	cloudflareRecordRegex = regexp.MustCompile(`(?i)^\s*resource\s+"cloudflare_record"\s+"([^"]+)"`)
-	s3BucketRegex = regexp.MustCompile(`(?i)^\s*resource\s+"aws_s3_bucket"\s+"([^"]+)"`)
+	s3BucketRegex         = regexp.MustCompile(`(?i)^\s*resource\s+"aws_s3_bucket"\s+"([^"]+)"`)
 
-	nameAttrRegex = regexp.MustCompile(`(?i)^\s*name\s*=\s*"([^"]+)"`)
-	typeAttrRegex = regexp.MustCompile(`(?i)^\s*type\s*=\s*"([^"]+)"`)
-	recordsAttrRegex = regexp.MustCompile(`(?i)^\s*records\s*=\s*\[\s*"([^"]+)"`)
-	contentAttrRegex = regexp.MustCompile(`(?i)^\s*content\s*=\s*"([^"]+)"`)
-	bucketAttrRegex = regexp.MustCompile(`(?i)^\s*bucket\s*=\s*"([^"]+)"`)
+	nameAttrRegex      = regexp.MustCompile(`(?i)^\s*name\s*=\s*"([^"]+)"`)
+	typeAttrRegex      = regexp.MustCompile(`(?i)^\s*type\s*=\s*"([^"]+)"`)
+	recordsStartRegex  = regexp.MustCompile(`(?i)^\s*records\s*=\s*\[`)
+	quotedStringRegex  = regexp.MustCompile(`"([^",\s]+)"`)
+	contentAttrRegex   = regexp.MustCompile(`(?i)^\s*content\s*=\s*"([^"]+)"`)
+	bucketAttrRegex    = regexp.MustCompile(`(?i)^\s*bucket\s*=\s*"([^"]+)"`)
+	aliasBlockRegex    = regexp.MustCompile(`(?i)^\s*alias\s*\{`)
 	aliasNameAttrRegex = regexp.MustCompile(`(?i)^\s*(?:dns_name|name)\s*=\s*"([^"]+)"`)
 )
 
@@ -77,6 +79,8 @@ func RunLocalEngine(ctx context.Context, dir string, prober correlator.ProberInt
 					OverrideSnippets: generateSnippets(findings),
 				}, nil
 			}
+		} else if err != nil {
+			fmt.Printf("ℹ Speculative plan skipped or failed (%v), falling back to static HCL scan\n", err)
 		}
 	}
 
@@ -202,6 +206,9 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 	lineNum := 0
 	inBlock := false
 	braceCount := 0
+	inAliasBlock := false
+	aliasBraceCount := 0
+	inRecordsArray := false
 
 	for scanner.Scan() {
 		lineNum++
@@ -221,6 +228,9 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 				StartLine:    lineNum,
 			}
 			inBlock = true
+			inAliasBlock = false
+			aliasBraceCount = 0
+			inRecordsArray = false
 			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
 			continue
 		}
@@ -233,6 +243,9 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 				StartLine:    lineNum,
 			}
 			inBlock = true
+			inAliasBlock = false
+			aliasBraceCount = 0
+			inRecordsArray = false
 			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
 			continue
 		}
@@ -245,25 +258,58 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 			}
 
 			if currentRecord != nil {
-				if nMatch := nameAttrRegex.FindStringSubmatch(line); nMatch != nil {
-					currentRecord.Domain = nMatch[1]
+				// Check for alias block start (§6.4 & P1-1)
+				if aliasBlockRegex.MatchString(line) {
+					inAliasBlock = true
+					aliasBraceCount = strings.Count(line, "{") - strings.Count(line, "}")
+				} else if inAliasBlock {
+					aliasBraceCount += strings.Count(line, "{") - strings.Count(line, "}")
 				}
-				if tMatch := typeAttrRegex.FindStringSubmatch(line); tMatch != nil {
-					currentRecord.RecordType = tMatch[1]
-				}
-				if rMatch := recordsAttrRegex.FindStringSubmatch(line); rMatch != nil {
-					currentRecord.Target = rMatch[1]
-				}
-				if cMatch := contentAttrRegex.FindStringSubmatch(line); cMatch != nil {
-					currentRecord.Target = cMatch[1]
-				}
-				if aMatch := aliasNameAttrRegex.FindStringSubmatch(line); aMatch != nil {
-					currentRecord.Target = aMatch[1]
+
+				if inAliasBlock {
+					if aMatch := aliasNameAttrRegex.FindStringSubmatch(line); aMatch != nil {
+						currentRecord.Target = aMatch[1]
+					}
+					if aliasBraceCount <= 0 {
+						inAliasBlock = false
+					}
+				} else {
+					// Top-level attributes outside alias block
+					if nMatch := nameAttrRegex.FindStringSubmatch(line); nMatch != nil {
+						currentRecord.Domain = nMatch[1]
+					}
+					if tMatch := typeAttrRegex.FindStringSubmatch(line); tMatch != nil {
+						currentRecord.RecordType = tMatch[1]
+					}
+					if cMatch := contentAttrRegex.FindStringSubmatch(line); cMatch != nil {
+						currentRecord.Target = cMatch[1]
+					}
+
+					// Multi-line and single-line records array parsing (P0-1)
+					if recordsStartRegex.MatchString(line) {
+						matches := quotedStringRegex.FindAllStringSubmatch(line, -1)
+						if len(matches) > 0 {
+							currentRecord.Target = matches[0][1]
+						}
+						if !strings.Contains(line, "]") {
+							inRecordsArray = true
+						}
+					} else if inRecordsArray {
+						matches := quotedStringRegex.FindAllStringSubmatch(line, -1)
+						if len(matches) > 0 && currentRecord.Target == "" {
+							currentRecord.Target = matches[0][1]
+						}
+						if strings.Contains(line, "]") {
+							inRecordsArray = false
+						}
+					}
 				}
 			}
 
 			if braceCount <= 0 {
 				inBlock = false
+				inAliasBlock = false
+				inRecordsArray = false
 				if currentRecord != nil {
 					if currentRecord.Domain != "" && currentRecord.Target != "" {
 						records = append(records, *currentRecord)
@@ -301,7 +347,21 @@ func generateSnippets(findings []correlator.Finding) map[string]string {
 	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
 		trimmed := strings.TrimSpace(string(out))
 		if trimmed != "" {
-			user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
+			if strings.Contains(trimmed, "@") {
+				parts := strings.Split(trimmed, "@")
+				user = "@" + strings.ToLower(parts[0])
+			} else {
+				user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
+			}
+		}
+	}
+	if user == "@developer" {
+		if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+			trimmed := strings.TrimSpace(string(out))
+			if trimmed != "" && strings.Contains(trimmed, "@") {
+				parts := strings.Split(trimmed, "@")
+				user = "@" + strings.ToLower(parts[0])
+			}
 		}
 	}
 

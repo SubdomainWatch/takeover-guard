@@ -83,3 +83,73 @@ resource "aws_route53_record" "dangling_record" {
 		t.Errorf("invalid snippet content: %s", snippet)
 	}
 }
+
+func TestMultiLineRecordsArrayAndAliasBlock(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "guard-multiline-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Tests multi-line records with terraform fmt indentation and trailing commas,
+	// plus an alias block where name is inside alias {} without conflicting with record name.
+	tfContent := `
+resource "aws_route53_record" "multiline_record" {
+  name = "multiline.acme.com"
+  type = "CNAME"
+  records = [
+    "unmanaged-multiline.s3.amazonaws.com",
+  ]
+}
+
+resource "aws_route53_record" "alias_record" {
+  name = "alias.acme.com"
+  type = "A"
+  alias {
+    name                   = "unmanaged-alias.s3-website-us-east-1.amazonaws.com"
+    zone_id                = "Z2FDTNDATAQYW2"
+    evaluate_target_health = false
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "dns.tf"), []byte(tfContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prober := &mockLocalProber{
+		isCloud: true,
+		isVuln:  true,
+	}
+
+	res, err := RunLocalEngine(context.Background(), tmpDir, prober)
+	if err != nil {
+		t.Fatalf("local engine failed: %v", err)
+	}
+
+	if res.EvaluatedRecords != 2 {
+		t.Fatalf("expected 2 evaluated records, got %d", res.EvaluatedRecords)
+	}
+
+	if len(res.Findings) != 2 {
+		t.Fatalf("expected 2 findings (multiline records + alias block), got %d", len(res.Findings))
+	}
+
+	foundMultiline := false
+	foundAlias := false
+	for _, f := range res.Findings {
+		if f.FQDN == "multiline.acme.com" && f.Target == "unmanaged-multiline.s3.amazonaws.com" {
+			foundMultiline = true
+		}
+		if f.FQDN == "alias.acme.com" && f.Target == "unmanaged-alias.s3-website-us-east-1.amazonaws.com" {
+			foundAlias = true
+		}
+	}
+
+	if !foundMultiline {
+		t.Errorf("expected finding for multiline.acme.com with target unmanaged-multiline.s3.amazonaws.com")
+	}
+	if !foundAlias {
+		t.Errorf("expected finding for alias.acme.com with target unmanaged-alias.s3-website-us-east-1.amazonaws.com")
+	}
+}
+
