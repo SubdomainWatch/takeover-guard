@@ -132,11 +132,11 @@ When releasing new versions to the GitHub Actions Marketplace:
    git push origin v2 --force
    ```
 2. **GHCR Container Build:**
-   * GitHub Actions runs `.github/workflows/release-guard.yml` to compile multi-arch binaries (`linux/amd64`, `linux/arm64`) and publish images to `ghcr.io/subdomainwatch/takeover-guard`.
+   * GitHub Actions runs `.github/workflows/release-guard.yml` to compile multi-arch binaries (`linux/amd64`, `linux/arm64`) and publish images to `ghcr.io/tdaeche-gif/takeover-guard`.
 3. **Configure GHCR Package Permissions (One-Time Setup):**
-   * Navigate to `https://github.com/orgs/subdomainwatch/packages/container/takeover-guard/settings`.
+   * Navigate to `https://github.com/users/tdaeche-gif/packages/container/takeover-guard/settings` (or your org packages settings).
    * Set visibility to **Public** so external workflows can pull without authentication.
-   * Under **"Manage Actions access"**, verify the repository `subdomainwatch/subdomainwatch` has the **Write** role.
+   * Under **"Manage Actions access"**, verify the repository `tdaeche-gif/subdomainwatch` has the **Write** role.
 4. **Publish to Marketplace:**
    * Open the GitHub Releases page for tag `v2.1.0`.
    * Select **"Publish this Action to the GitHub Marketplace"**.
