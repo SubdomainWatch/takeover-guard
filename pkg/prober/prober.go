@@ -1,6 +1,7 @@
 package prober
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,13 +29,56 @@ type Prober struct {
 	wildcardCache map[string]*WildcardBaseline
 }
 
+func isIPBlocked(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	// Cloud metadata (169.254.0.0/16, AWS/GCP/Azure)
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+	}
+	return false
+}
+
 func NewProber(engine *FingerprintEngine) *Prober {
+	dialer := &net.Dialer{
+		Timeout:   2 * time.Second,
+		KeepAlive: 15 * time.Second,
+	}
+
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: 15 * time.Second,
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+
+			var safeIP net.IP
+			for _, ip := range ips {
+				if isIPBlocked(ip) {
+					return nil, fmt.Errorf("SSRF guard: refusing connection to %s (%s)", host, ip)
+				}
+				if safeIP == nil {
+					safeIP = ip
+				}
+			}
+
+			if safeIP == nil {
+				return nil, fmt.Errorf("SSRF guard: no valid IP resolved for %s", host)
+			}
+
+			// Pin connection to the first validated safe IP to prevent DNS rebinding TOCTOU
+			pinnedAddr := net.JoinHostPort(safeIP.String(), port)
+			return dialer.DialContext(ctx, network, pinnedAddr)
+		},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     30 * time.Second,
@@ -58,6 +102,11 @@ func NewProber(engine *FingerprintEngine) *Prober {
 		httpSem:       make(chan struct{}, 10), // Max 10 concurrent HTTP clients (§7)
 		wildcardCache: make(map[string]*WildcardBaseline),
 	}
+}
+
+// SetCustomTransport allows test harnesses or mocks to override the transport
+func (p *Prober) SetCustomTransport(rt http.RoundTripper) {
+	p.httpClient.Transport = rt
 }
 
 // IsCloudProviderTarget checks if a canonical target matches any known CNAME patterns from fingerprint database
@@ -94,11 +143,6 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 	}
 
 	if len(matchingSigs) == 0 {
-		return false, "", ""
-	}
-
-	// SSRF Guard: Prevent scanning internal or loopback IP ranges
-	if !isSafeHost(normFQDN) && !isSafeHost(normTarget) {
 		return false, "", ""
 	}
 
@@ -244,19 +288,4 @@ func extractApex(fqdn string) string {
 	}
 	// Simple two-part TLD handling
 	return parts[len(parts)-2] + "." + parts[len(parts)-1]
-}
-
-func isSafeHost(host string) bool {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		// Could not resolve; let dialer or prober handle failure
-		return true
-	}
-
-	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsMulticast() {
-			return false
-		}
-	}
-	return true
 }

@@ -112,10 +112,11 @@ func (e *FingerprintEngine) UpdateFromRemote(url string) error {
 	}
 
 	sigHex := resp.Header.Get("X-Signature-Ed25519")
-	if sigHex != "" {
-		if !verifyEd25519Signature(body, sigHex) {
-			return fmt.Errorf("cryptographic signature verification failed for remote bundle")
-		}
+	if sigHex == "" {
+		return fmt.Errorf("remote bundle rejected: missing X-Signature-Ed25519 header (possible MITM)")
+	}
+	if !verifyEd25519Signature(body, sigHex) {
+		return fmt.Errorf("cryptographic signature verification failed for remote bundle")
 	}
 
 	var bundle FingerprintBundle

@@ -87,6 +87,7 @@ func TestProbeClaimabilityMatch(t *testing.T) {
 	defer ts.Close()
 
 	prober := NewProber(engine)
+	prober.SetCustomTransport(ts.Client().Transport)
 
 	// Inject custom test transport mapping test host to mock server URL
 	vulnerable, sev, rem := prober.ProbeClaimability(ts.Listener.Addr().String(), "acme-test.s3.amazonaws.com")

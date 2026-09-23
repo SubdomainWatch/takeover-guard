@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -50,6 +51,12 @@ func main() {
 	// Environment variable overrides (from GitHub Actions env)
 	if envKey := os.Getenv("SUBDOMAINWATCH_API_KEY"); envKey == "" {
 		fmt.Fprintf(os.Stderr, "ℹ No SUBDOMAINWATCH_API_KEY detected. Running in Standalone Local Engine Mode (zero secrets exfiltration risk).\n")
+	} else {
+		apiKeyRegex := regexp.MustCompile(`^sw_guard_[0-9a-f]{48}$`)
+		if !apiKeyRegex.MatchString(envKey) {
+			fmt.Fprintf(os.Stderr, "ERROR: Invalid SUBDOMAINWATCH_API_KEY format. Expected sw_guard_<48-hex>.\n")
+			os.Exit(1)
+		}
 	}
 
 	// 1. Global Performance Budget & Hard Timeout Cap (§7)

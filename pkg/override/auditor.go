@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	ignoreRegex = regexp.MustCompile(`(?i)^\s*#\s*subdomainwatch-ignore:\s*([A-Za-z0-9*-]+)\s+domain=([^\s]+)\s+expires=([^\s]+)\s+approver=([^\s]+)\s+reason="([^"]+)"`)
+	ignoreRegex = regexp.MustCompile(`(?i)^\s*(?:#|//)\s*subdomainwatch-ignore:\s*([A-Za-z0-9*-]+)\s+domain=([^\s]+)\s+expires=([^\s]+)\s+approver=([^\s]+)\s+reason="([^"]+)"`)
 	resourceRegex = regexp.MustCompile(`(?i)^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
 )
 
@@ -70,15 +70,20 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 			approver := match[4]
 			reason := match[5]
 
+			if ruleID == "*" {
+				return fmt.Errorf("%s:%d: Wildcard '*' rule IDs are not permitted. Specify explicit rule IDs (e.g., SW-G-001)", filePath, lineNum)
+			}
+
 			expiresDate, err := time.Parse("2006-01-02", expiresStr)
 			if err != nil {
 				return fmt.Errorf("%s:%d: invalid expires date format '%s' (expected YYYY-MM-DD)", filePath, lineNum, expiresStr)
 			}
 
-			// Validate expiration policy (§9.2):
-			// If expires <= today: fail build
+			// Validate expiration policy (§9.2 & Gap 3 / P1-4):
+			// If expires <= today: log warning and do NOT suppress findings, but do NOT crash build
 			if !expiresDate.After(a.now) {
-				return fmt.Errorf("ERROR: Override for %s expired on %s (file %s:%d)", domain, expiresStr, filePath, lineNum)
+				fmt.Fprintf(os.Stderr, "⚠ Override for %s expired on %s (file %s:%d) — override will not suppress findings\n", domain, expiresStr, filePath, lineNum)
+				continue
 			}
 
 			// If expires > today + 90 days: fail build
@@ -121,7 +126,7 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 		}
 
 		// If a non-blank, non-comment line appears before resource, invalidate pending ignore
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
 			if pendingEntry != nil {
 				return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at line %d rejected", filePath, lineNum, lastCommentLine)
 			}
@@ -158,7 +163,7 @@ func (a *OverrideAuditor) IsIgnored(ruleID, fqdn string) (bool, *IgnoreEntry) {
 		return false, nil
 	}
 
-	if entry.RuleID == "*" || strings.EqualFold(entry.RuleID, ruleID) {
+	if strings.EqualFold(entry.RuleID, ruleID) {
 		return true, entry
 	}
 
