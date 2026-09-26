@@ -29,16 +29,68 @@ type Prober struct {
 	wildcardCache map[string]*WildcardBaseline
 }
 
+// isIPBlocked implements the consolidated SSRF blocklist kept in exact parity
+// with web/src/lib/security/net-guard.ts and core/net_guard.py (Phase 4):
+// loopback, RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT 100.64.0.0/10,
+// link-local 169.254.0.0/16 (cloud metadata), IETF protocol 192.0.0.0/24,
+// TEST-NET-1/2/3 (192.0.2/24, 198.51.100/24, 203.0.113/24), benchmarking
+// 198.18.0.0/15, multicast 224.0.0.0/4, reserved 240.0.0.0/4, broadcast
+// 255.255.255.255/32, current network 0.0.0.0/8, IPv6 ULA fc00::/7
+// (incl. AWS IMDSv6 fd00:ec2::254), IPv6 link-local fe80::/10, IPv6
+// multicast ff00::/8, documentation 2001:db8::/32, discard 100::/64.
+// Fail-closed: nil or unparseable addresses are blocked.
 func isIPBlocked(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+
+	// net.IP predicates: loopback, private (RFC 1918 / fc00::/7 ULA incl.
+	// AWS IMDSv6 fd00:ec2::254), link-local unicast + multicast (169.254/16,
+	// fe80::/10), multicast (224.0.0.0/4, ff00::/8), and unspecified.
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	// Cloud metadata (169.254.0.0/16, AWS/GCP/Azure)
+
 	if ip4 := ip.To4(); ip4 != nil {
-		if ip4[0] == 169 && ip4[1] == 254 {
+		// IPv4 specials not covered by the predicates above
+		switch {
+		case ip4[0] == 0: // 0.0.0.0/8 - current network
+			return true
+		case ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127: // 100.64.0.0/10 - CGNAT
+			return true
+		case ip4[0] == 169 && ip4[1] == 254: // 169.254.0.0/16 - link-local / cloud IMDS
+			return true
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24 - IETF protocol assignments
+			return true
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2: // 192.0.2.0/24 - TEST-NET-1
+			return true
+		case ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19): // 198.18.0.0/15 - benchmarking
+			return true
+		case ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100: // 198.51.100.0/24 - TEST-NET-2
+			return true
+		case ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113: // 203.0.113.0/24 - TEST-NET-3
+			return true
+		case ip4[0] == 255 && ip4[1] == 255 && ip4[2] == 255 && ip4[3] == 255: // broadcast
+			return true
+		case ip4[0] >= 240: // 240.0.0.0/4 - reserved / future use
+			return true
+		}
+		return false
+	}
+
+	if ip16 := ip.To16(); ip16 != nil {
+		// IPv6 specials beyond the predicates above
+		// 100::/64 - discard-only address block
+		if ip16[0] == 0x01 && ip16[1] == 0x00 && ip16[2] == 0 && ip16[3] == 0 &&
+			ip16[4] == 0 && ip16[5] == 0 && ip16[6] == 0 && ip16[7] == 0 {
+			return true
+		}
+		// 2001:db8::/32 - documentation
+		if ip16[0] == 0x20 && ip16[1] == 0x01 && ip16[2] == 0x0d && ip16[3] == 0xb8 {
 			return true
 		}
 	}
+
 	return false
 }
 
