@@ -52,8 +52,8 @@ func TestSyncTelemetry_Success(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if receivedAuth != "Bearer sw_guard_mockkey123" {
-		t.Errorf("expected Bearer auth header, got %s", receivedAuth)
+	if receivedAuth != "" {
+		t.Errorf("expected no duplicate Authorization header, got %s", receivedAuth)
 	}
 	if receivedApiKey != "sw_guard_mockkey123" {
 		t.Errorf("expected X-API-Key header, got %s", receivedApiKey)

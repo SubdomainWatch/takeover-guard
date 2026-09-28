@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	ignoreRegex = regexp.MustCompile(`(?i)^\s*(?:#|//)\s*subdomainwatch-ignore:\s*([A-Za-z0-9*-]+)\s+domain=([^\s]+)\s+expires=([^\s]+)\s+approver=([^\s]+)\s+reason="([^"]+)"`)
+	ignoreRegex   = regexp.MustCompile(`(?i)^\s*(?:#|//)\s*subdomainwatch-ignore:\s*([A-Za-z0-9*-]+)\s+domain=([^\s]+)\s+expires=([^\s]+)\s+approver=([^\s]+)\s+reason="([^"]+)"`)
 	resourceRegex = regexp.MustCompile(`(?i)^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
 )
 
@@ -27,13 +27,13 @@ type IgnoreEntry struct {
 }
 
 type OverrideAuditor struct {
-	overrides map[string]*IgnoreEntry // domain -> entry
+	overrides map[[2]string]*IgnoreEntry // {domain, ruleID} -> entry
 	now       time.Time
 }
 
 func NewOverrideAuditor() *OverrideAuditor {
 	return &OverrideAuditor{
-		overrides: make(map[string]*IgnoreEntry),
+		overrides: make(map[[2]string]*IgnoreEntry),
 		now:       time.Now().UTC(),
 	}
 }
@@ -119,7 +119,7 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 				resName := resMatch[2]
 				pendingEntry.TargetRes = fmt.Sprintf("%s.%s", resType, resName)
 
-				a.overrides[pendingEntry.Domain] = pendingEntry
+				a.overrides[[2]string{pendingEntry.Domain, pendingEntry.RuleID}] = pendingEntry
 				pendingEntry = nil
 			}
 			continue
@@ -158,14 +158,9 @@ func (a *OverrideAuditor) ScanDirectory(dir string) error {
 // IsIgnored checks if finding matches a valid active override
 func (a *OverrideAuditor) IsIgnored(ruleID, fqdn string) (bool, *IgnoreEntry) {
 	norm := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
-	entry, exists := a.overrides[norm]
+	entry, exists := a.overrides[[2]string{norm, ruleID}]
 	if !exists {
 		return false, nil
 	}
-
-	if strings.EqualFold(entry.RuleID, ruleID) {
-		return true, entry
-	}
-
-	return false, nil
+	return true, entry
 }

@@ -9,18 +9,18 @@ import (
 )
 
 var (
-	s3Pattern       = regexp.MustCompile(`^([a-z0-9.-]+)\.s3(?:-website)?(?:[.-][a-z0-9-]+)?\.amazonaws\.com$`)
-	herokuPattern   = regexp.MustCompile(`^([a-z0-9-]+)\.(?:herokudns|herokuapp)\.com$`)
-	githubPattern   = regexp.MustCompile(`^([a-z0-9-]+)\.github\.io$`)
-	azurePattern    = regexp.MustCompile(`^([a-z0-9-]+)\.(?:azurewebsites\.net|cloudapp\.net|trafficmanager\.net|azurefd\.net)$`)
-	netlifyPattern  = regexp.MustCompile(`^([a-z0-9-]+)\.netlify\.(?:app|com)$`)
-	readmePattern   = regexp.MustCompile(`^([a-z0-9-]+)\.readme\.io$`)
-	surgePattern    = regexp.MustCompile(`^([a-z0-9-]+)\.surge\.sh$`)
-	shopifyPattern  = regexp.MustCompile(`^([a-z0-9-]+)\.myshopify\.com$`)
-	fastlyPattern   = regexp.MustCompile(`^([a-z0-9-]+)\.fastly\.net$`)
+	s3Pattern        = regexp.MustCompile(`^([a-z0-9.-]+)\.s3(?:-website)?(?:[.-][a-z0-9-]+)?\.amazonaws\.com$`)
+	herokuPattern    = regexp.MustCompile(`^([a-z0-9-]+)\.(?:herokudns|herokuapp)\.com$`)
+	githubPattern    = regexp.MustCompile(`^([a-z0-9-]+)\.github\.io$`)
+	azurePattern     = regexp.MustCompile(`^([a-z0-9-]+)\.(?:azurewebsites\.net|cloudapp\.net|trafficmanager\.net|azurefd\.net)$`)
+	netlifyPattern   = regexp.MustCompile(`^([a-z0-9-]+)\.netlify\.(?:app|com)$`)
+	readmePattern    = regexp.MustCompile(`^([a-z0-9-]+)\.readme\.io$`)
+	surgePattern     = regexp.MustCompile(`^([a-z0-9-]+)\.surge\.sh$`)
+	shopifyPattern   = regexp.MustCompile(`^([a-z0-9-]+)\.myshopify\.com$`)
+	fastlyPattern    = regexp.MustCompile(`^([a-z0-9-]+)\.fastly\.net$`)
 	bitbucketPattern = regexp.MustCompile(`^([a-z0-9-]+)\.bitbucket\.io$`)
-	ghostPattern    = regexp.MustCompile(`^([a-z0-9-]+)\.ghost\.io$`)
-	flyPattern      = regexp.MustCompile(`^([a-z0-9-]+)\.(?:edgeapp\.net|fly\.dev)$`)
+	ghostPattern     = regexp.MustCompile(`^([a-z0-9-]+)\.ghost\.io$`)
+	flyPattern       = regexp.MustCompile(`^([a-z0-9-]+)\.(?:edgeapp\.net|fly\.dev)$`)
 )
 
 type DnsRecordEntry struct {
@@ -297,6 +297,59 @@ func EvaluatePlan(plan *PlanJSON, prober ProberInterface) ([]Finding, int, error
 				}
 			}
 		}
+
+		// -------------------------------------------------------------
+		// 5. AZURE DNS CNAME RECORD LIFECYCLE
+		// -------------------------------------------------------------
+		if rtype == "azurerm_dns_cname_record" {
+			totalModifiedDnsRecords++
+			fqdn := azureRecordFQDN(before)
+			if fqdn == "" {
+				fqdn = azureRecordFQDN(after)
+			}
+			target := getString(before, "record")
+			if !isDelete {
+				target = getString(after, "record")
+			}
+			target = NormalizeDomain(target)
+			if fqdn != "" && target != "" {
+				if isDelete {
+					deletedDnsRecords[fqdn] = target
+				} else {
+					activeDnsRecords[fqdn] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: "CNAME"}
+				}
+			}
+		}
+
+		// -------------------------------------------------------------
+		// 6. GOOGLE CLOUD DNS CNAME RECORD LIFECYCLE
+		// -------------------------------------------------------------
+		if rtype == "google_dns_record_set" {
+			recType := getString(before, "type")
+			if recType == "" {
+				recType = getString(after, "type")
+			}
+			if strings.EqualFold(recType, "CNAME") {
+				totalModifiedDnsRecords++
+				name := getString(before, "name")
+				if name == "" {
+					name = getString(after, "name")
+				}
+				fqdn := NormalizeDomain(name)
+				values := getSlice(after, "rrdatas")
+				if isDelete {
+					values = getSlice(before, "rrdatas")
+				}
+				if fqdn != "" && len(values) > 0 {
+					target := NormalizeDomain(fmt.Sprint(values[0]))
+					if isDelete {
+						deletedDnsRecords[fqdn] = target
+					} else {
+						activeDnsRecords[fqdn] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: recType}
+					}
+				}
+			}
+		}
 	}
 
 	// -----------------------------------------------------------------
@@ -378,6 +431,15 @@ func addResource(m map[string]map[string]struct{}, provider, id string) {
 		m[provider] = make(map[string]struct{})
 	}
 	m[provider][id] = struct{}{}
+}
+
+func azureRecordFQDN(attrs map[string]any) string {
+	name := NormalizeDomain(getString(attrs, "name"))
+	zone := NormalizeDomain(getString(attrs, "zone_name"))
+	if name == "" || zone == "" {
+		return ""
+	}
+	return name + "." + zone
 }
 
 func getString(m map[string]any, key string) string {

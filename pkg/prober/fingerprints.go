@@ -106,9 +106,13 @@ func (e *FingerprintEngine) UpdateFromRemote(url string) error {
 		return fmt.Errorf("remote signatures returned HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	const maxBundleBytes = 8 << 20 // 8 MiB signed bundle ceiling
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBundleBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(body) > maxBundleBytes {
+		return fmt.Errorf("remote bundle exceeds %d byte ceiling; rejected", maxBundleBytes)
 	}
 
 	sigHex := resp.Header.Get("X-Signature-Ed25519")

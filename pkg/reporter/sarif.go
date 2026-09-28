@@ -1,6 +1,8 @@
 package reporter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,11 +33,11 @@ type SarifDriver struct {
 }
 
 type SarifRule struct {
-	ID                   string                 `json:"id"`
-	Name                 string                 `json:"name"`
-	ShortDescription     SarifText              `json:"shortDescription"`
-	DefaultConfiguration SarifRuleConfig        `json:"defaultConfiguration"`
-	Properties           map[string]any         `json:"properties"`
+	ID                   string          `json:"id"`
+	Name                 string          `json:"name"`
+	ShortDescription     SarifText       `json:"shortDescription"`
+	DefaultConfiguration SarifRuleConfig `json:"defaultConfiguration"`
+	Properties           map[string]any  `json:"properties"`
 }
 
 type SarifRuleConfig struct {
@@ -47,10 +49,11 @@ type SarifText struct {
 }
 
 type SarifResult struct {
-	RuleID    string          `json:"ruleId"`
-	Level     string          `json:"level"`
-	Message   SarifText       `json:"message"`
-	Locations []SarifLocation `json:"locations,omitempty"`
+	RuleID              string            `json:"ruleId"`
+	Level               string            `json:"level"`
+	Message             SarifText         `json:"message"`
+	Locations           []SarifLocation   `json:"locations,omitempty"`
+	PartialFingerprints map[string]string `json:"partialFingerprints,omitempty"`
 }
 
 type SarifLocation struct {
@@ -144,6 +147,10 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 					},
 				},
 			},
+		}
+		lineHash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s", f.RuleID, f.FQDN, f.Target)))
+		res.PartialFingerprints = map[string]string{
+			"primaryLocationLineHash": hex.EncodeToString(lineHash[:]),
 		}
 
 		results = append(results, res)

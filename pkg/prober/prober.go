@@ -198,13 +198,13 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 		return false, "", ""
 	}
 
+	// Acquire HTTP semaphore before any network call, including the wildcard baseline.
+	p.httpSem <- struct{}{}
+	defer func() { <-p.httpSem }()
+
 	// Wildcard Subdomain Probing Baseline Check (§6.3)
 	apex := extractApex(normFQDN)
 	baseline := p.getWildcardBaseline(apex)
-
-	// Acquire HTTP semaphore
-	p.httpSem <- struct{}{}
-	defer func() { <-p.httpSem }()
 
 	// Probe target endpoint using 16KB range request
 	status, bodyStr, bodyHash, headers, err := p.executeSafeProbe(normFQDN)
@@ -306,31 +306,26 @@ func (p *Prober) getWildcardBaseline(apex string) *WildcardBaseline {
 		return baseline
 	}
 
-	p.wildcardLock.Lock()
-	defer p.wildcardLock.Unlock()
-
-	// Double-check after lock
-	if baseline, exists := p.wildcardCache[apex]; exists {
-		return baseline
-	}
-
+	// Network calls run outside the write lock. Concurrent first probes may
+	// fetch duplicate baselines; publish only the first completed result.
 	// Generate unguessable probe host: __sw_probe_<hex16>.<apex>
 	randBytes := make([]byte, 8)
 	_, _ = rand.Read(randBytes)
 	probeHost := fmt.Sprintf("__sw_probe_%s.%s", hex.EncodeToString(randBytes), apex)
 
 	status, _, bodyHash, _, err := p.executeSafeProbe(probeHost)
-	if err != nil {
-		p.wildcardCache[apex] = nil
-		return nil
+	var result *WildcardBaseline
+	if err == nil {
+		result = &WildcardBaseline{StatusCode: status, BodyHash: bodyHash}
 	}
 
-	b := &WildcardBaseline{
-		StatusCode: status,
-		BodyHash:   bodyHash,
+	p.wildcardLock.Lock()
+	defer p.wildcardLock.Unlock()
+	if baseline, exists := p.wildcardCache[apex]; exists {
+		return baseline
 	}
-	p.wildcardCache[apex] = b
-	return b
+	p.wildcardCache[apex] = result
+	return result
 }
 
 func extractApex(fqdn string) string {

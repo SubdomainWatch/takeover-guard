@@ -113,7 +113,9 @@ func scanHCLFiles(dir string, prober correlator.ProberInterface) (*LocalScanResu
 
 	// Audit in-code overrides
 	auditor := override.NewOverrideAuditor()
-	_ = auditor.ScanDirectory(dir)
+	if err := auditor.ScanDirectory(dir); err != nil {
+		return nil, fmt.Errorf("in-code override validation failure: %w", err)
+	}
 
 	var findings []correlator.Finding
 

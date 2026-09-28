@@ -20,18 +20,18 @@ import (
 
 func main() {
 	var (
-		planFile        string
-		mode            string
-		failOnSeverity  string
-		failMode        string
-		sarifFile       string
-		jsonFile        string
-		tfDir           string
-		settleDelay     int
-		offlineOnly     bool
-		signaturesURL   string
-		localMode       bool
-		syncURL         string
+		planFile       string
+		mode           string
+		failOnSeverity string
+		failMode       string
+		sarifFile      string
+		jsonFile       string
+		tfDir          string
+		settleDelay    int
+		offlineOnly    bool
+		signaturesURL  string
+		localMode      bool
+		syncURL        string
 	)
 
 	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON")
@@ -49,14 +49,13 @@ func main() {
 	flag.Parse()
 
 	// Environment variable overrides (from GitHub Actions env)
+	if failMode != "closed" && failMode != "open" {
+		exitConfigFail(failMode, "ERROR: Invalid fail mode %q; expected closed or open.\n", failMode)
+	}
 	if envKey := os.Getenv("SUBDOMAINWATCH_API_KEY"); envKey == "" {
 		fmt.Fprintf(os.Stderr, "ℹ No SUBDOMAINWATCH_API_KEY detected. Running in Standalone Local Engine Mode (zero secrets exfiltration risk).\n")
-	} else {
-		apiKeyRegex := regexp.MustCompile(`^sw_guard_[0-9a-f]{48}$`)
-		if !apiKeyRegex.MatchString(envKey) {
-			fmt.Fprintf(os.Stderr, "ERROR: Invalid SUBDOMAINWATCH_API_KEY format. Expected sw_guard_<48-hex>.\n")
-			os.Exit(1)
-		}
+	} else if !regexp.MustCompile(`^sw_guard_[0-9a-f]{48}$`).MatchString(envKey) {
+		exitConfigFail(failMode, "ERROR: Invalid SUBDOMAINWATCH_API_KEY format. Expected sw_guard_<48-hex>.\n")
 	}
 
 	// 1. Global Performance Budget & Hard Timeout Cap (§7)
@@ -71,19 +70,14 @@ func main() {
 		select {
 		case <-time.After(time.Duration(settleDelay) * time.Second):
 		case <-ctx.Done():
-			fmt.Fprintln(os.Stderr, "Error: Timeout reached during settle delay")
-			os.Exit(1)
+			exitConfigFail(failMode, "Error: Timeout reached during settle delay\n")
 		}
 	}
 
 	// 2. Initialize Fingerprint Engine & Prober (§5)
 	engine, err := prober.NewFingerprintEngine()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing fingerprint engine: %v\n", err)
-		if strings.EqualFold(failMode, "closed") {
-			os.Exit(1)
-		}
-		os.Exit(0)
+		exitConfigFail(failMode, "Error initializing fingerprint engine: %v\n", err)
 	}
 
 	if !offlineOnly {
@@ -108,11 +102,7 @@ func main() {
 		fmt.Printf("🔍 Running Local Developer Pre-Commit Engine in '%s'...\n", tfDir)
 		localRes, err := localscan.RunLocalEngine(ctx, tfDir, claimProber)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error during local scan: %v\n", err)
-			if strings.EqualFold(failMode, "closed") {
-				os.Exit(1)
-			}
-			os.Exit(0)
+			exitConfigFail(failMode, "Error during local scan: %v\n", err)
 		}
 
 		activeFindings = localRes.Findings
@@ -128,20 +118,12 @@ func main() {
 		// CI Plan Path
 		planBytes, err := os.ReadFile(planFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to read plan file '%s': %v\n", planFile, err)
-			if strings.EqualFold(failMode, "closed") {
-				os.Exit(1)
-			}
-			os.Exit(0)
+			exitConfigFail(failMode, "Error: Failed to read plan file '%s': %v\n", planFile, err)
 		}
 
 		findings, modifiedCount, err := correlator.EvaluatePlanBytes(planBytes, claimProber)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error evaluating plan: %v\n", err)
-			if strings.EqualFold(failMode, "closed") {
-				os.Exit(1)
-			}
-			os.Exit(0)
+			exitConfigFail(failMode, "Error evaluating plan: %v\n", err)
 		}
 		totalModified = modifiedCount
 
@@ -149,16 +131,13 @@ func main() {
 		const maxRecords = 200
 		if totalModified > maxRecords {
 			reporter.PrintBudgetExceeded(os.Stderr, totalModified, maxRecords)
-			if strings.EqualFold(failMode, "closed") {
-				os.Exit(1)
-			}
+			exitConfigFail(failMode, "Execution budget exceeded; refusing to continue.\n")
 		}
 
 		// Audit In-Code Overrides (§9)
 		auditor := override.NewOverrideAuditor()
 		if err := auditor.ScanDirectory(tfDir); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ In-Code Override Validation Failure: %v\n", err)
-			os.Exit(1)
+			exitConfigFail(failMode, "❌ In-Code Override Validation Failure: %v\n", err)
 		}
 
 		for _, f := range findings {
@@ -187,6 +166,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to write JSON report: %v\n", err)
 		}
 	}
+	writeGitHubOutputs(sarifFile, len(activeFindings))
 
 	// 5. Output Terminal Summary & Pre-Commit Overrides
 	reporter.PrintResults(os.Stdout, summary)
@@ -270,6 +250,31 @@ func main() {
 	}
 
 	os.Exit(0)
+}
+
+// exitConfigFail reports operational/configuration failures separately from blocking findings.
+func exitConfigFail(_ string, format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format, a...)
+	os.Exit(2)
+}
+
+// writeGitHubOutputs publishes declared GitHub Action outputs when available.
+func writeGitHubOutputs(sarifFile string, findingsCount int) {
+	path := os.Getenv("GITHUB_OUTPUT")
+	if path == "" {
+		return
+	}
+	if strings.ContainsAny(sarifFile, "\r\n") {
+		exitConfigFail("closed", "Invalid SARIF output path for GITHUB_OUTPUT\n")
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		exitConfigFail("closed", "Failed to open GITHUB_OUTPUT: %v\n", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "sarif_file=%s\nfindings_count=%d\n", sarifFile, findingsCount); err != nil {
+		exitConfigFail("closed", "Failed to write GITHUB_OUTPUT: %v\n", err)
+	}
 }
 
 func fileExists(path string) bool {
