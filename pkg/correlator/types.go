@@ -16,19 +16,19 @@ const (
 
 // Terraform Plan JSON data structures
 type PlanJSON struct {
-	FormatVersion   string           `json:"format_version,omitempty"`
-	TerraformVersion string          `json:"terraform_version,omitempty"`
-	ResourceChanges []ResourceChange `json:"resource_changes"`
+	FormatVersion    string           `json:"format_version,omitempty"`
+	TerraformVersion string           `json:"terraform_version,omitempty"`
+	ResourceChanges  []ResourceChange `json:"resource_changes"`
 }
 
 type ResourceChange struct {
-	Address      string    `json:"address"`
-	ModuleAddress string   `json:"module_address,omitempty"`
-	Mode         string    `json:"mode,omitempty"`
-	Type         string    `json:"type"`
-	Name         string    `json:"name"`
-	ProviderName string    `json:"provider_name,omitempty"`
-	Change       ChangeObj `json:"change"`
+	Address       string    `json:"address"`
+	ModuleAddress string    `json:"module_address,omitempty"`
+	Mode          string    `json:"mode,omitempty"`
+	Type          string    `json:"type"`
+	Name          string    `json:"name"`
+	ProviderName  string    `json:"provider_name,omitempty"`
+	Change        ChangeObj `json:"change"`
 }
 
 type ChangeObj struct {

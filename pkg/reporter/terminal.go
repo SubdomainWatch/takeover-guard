@@ -85,4 +85,3 @@ func PrintSnippets(w io.Writer, snippets map[string]string) {
 		fmt.Fprintf(w, "    %s%s%s\n\n", colorYellow, snippet, colorReset)
 	}
 }
-

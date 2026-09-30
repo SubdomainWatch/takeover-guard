@@ -152,4 +152,3 @@ resource "aws_route53_record" "alias_record" {
 		t.Errorf("expected finding for alias.acme.com with target unmanaged-alias.s3-website-us-east-1.amazonaws.com")
 	}
 }
-

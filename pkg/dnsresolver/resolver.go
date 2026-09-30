@@ -12,15 +12,15 @@ import (
 )
 
 type DNSResolver struct {
-	client       *dns.Client
-	sem          chan struct{} // 20 concurrent goroutines (§7)
-	timeout      time.Duration
-	defaultNS    []string
+	client    *dns.Client
+	sem       chan struct{} // 20 concurrent goroutines (§7)
+	timeout   time.Duration
+	defaultNS []string
 
-	cbLock           sync.Mutex
+	cbLock              sync.Mutex
 	consecutiveTimeouts int
-	timedOutTargets  []string
-	isTripped        bool
+	timedOutTargets     []string
+	isTripped           bool
 }
 
 func NewDNSResolver() *DNSResolver {
