@@ -55,7 +55,36 @@ func PrintResults(w io.Writer, report *SummaryReport) {
 		if f.Address != "" {
 			fmt.Fprintf(w, "    %sResource:%s %s\n", colorDim, colorReset, f.Address)
 		}
-		fmt.Fprintf(w, "    %sReason:%s %s\n\n", colorDim, colorReset, f.Reason)
+		// Clickable file:line so CI terminals and editors jump to the exact
+		// Terraform/HCL record that produced the finding (HCL dir scans only;
+		// plan-JSON mode has no source locations to map).
+		if f.SourceFile != "" {
+			loc := f.SourceFile
+			if f.StartLine > 0 {
+				loc = fmt.Sprintf("%s:%d", f.SourceFile, f.StartLine)
+			}
+			fmt.Fprintf(w, "    %sLocation:%s %s\n", colorCyan, colorReset, loc)
+		}
+		fmt.Fprintf(w, "    %sReason:%s %s\n", colorDim, colorReset, f.Reason)
+		fmt.Fprintf(w, "    %sImpact:%s %s\n\n", colorDim, colorReset, plainBlastRadius(f))
+	}
+
+	fmt.Fprintf(w, "%sNEXT STEPS:%s delete or re-point the listed DNS records (or claim the target\n", colorBold, colorReset)
+	fmt.Fprintf(w, "cloud resource), then re-run the scan. Use --sarif results.sarif to publish\n")
+	fmt.Fprintf(w, "file:line annotations to GitHub code scanning.\n\n")
+}
+
+// plainBlastRadius renders a one-line, jargon-free consequence statement so
+// CI logs explain *why* a dangling record matters (phishing, cookie theft,
+// malware hosting) without requiring DNS expertise.
+func plainBlastRadius(f correlator.Finding) string {
+	switch f.Severity {
+	case correlator.SeverityCritical:
+		return "Unclaimed cloud resource behind this hostname - attackers can host fake login pages, steal session cookies, and serve malware on your domain."
+	case correlator.SeverityHigh:
+		return "Likely takeover path on this hostname - credential phishing and SSO redirect abuse become possible if the target stays unclaimed."
+	default:
+		return "Target is unresolvable at plan time - verify after apply, otherwise the record may resolve to an unclaimed service."
 	}
 }
 

@@ -36,6 +36,7 @@ type SarifRule struct {
 	ID                   string          `json:"id"`
 	Name                 string          `json:"name"`
 	ShortDescription     SarifText       `json:"shortDescription"`
+	HelpURI              string          `json:"helpUri,omitempty"`
 	DefaultConfiguration SarifRuleConfig `json:"defaultConfiguration"`
 	Properties           map[string]any  `json:"properties"`
 }
@@ -82,6 +83,7 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 			ShortDescription: SarifText{
 				Text: "Cloud resource deleted while DNS record remains active",
 			},
+			HelpURI: "https://subdomainwatch.com/guides/dns-takeover",
 			DefaultConfiguration: SarifRuleConfig{Level: "error"},
 			Properties: map[string]any{
 				"tags": []string{"security", "dns", "takeover"},
@@ -93,6 +95,7 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 			ShortDescription: SarifText{
 				Text: "DNS record points to an unclaimed third-party cloud service",
 			},
+			HelpURI: "https://subdomainwatch.com/guides/dns-takeover",
 			DefaultConfiguration: SarifRuleConfig{Level: "error"},
 			Properties: map[string]any{
 				"tags": []string{"security", "dns", "takeover"},
@@ -104,6 +107,7 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 			ShortDescription: SarifText{
 				Text: "Dynamic computed DNS target flagged for Post-Apply Sentinel",
 			},
+			HelpURI: "https://subdomainwatch.com/guides/dns-takeover",
 			DefaultConfiguration: SarifRuleConfig{Level: "warning"},
 			Properties: map[string]any{
 				"tags": []string{"security", "dns", "sentinel"},
