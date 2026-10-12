@@ -1,6 +1,6 @@
-name: 'SubdomainWatch Takeover Guard'
+name: 'Subdomain Takeover Guard'
 description: 'Shift-left detection of dangling DNS records and subdomain takeovers in IaC Pull Requests'
-author: 'SubdomainWatch Core Security'
+author: 'SubdomainWatch'
 
 branding:
   icon: 'shield'
