@@ -1,0 +1,96 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "SubdomainWatch Takeover Guard",
+          "version": "2.1.0",
+          "informationUri": "https://subdomainwatch.com/spec",
+          "rules": [
+            {
+              "id": "SW-G-001",
+              "name": "UncoordinatedResourceOrphan",
+              "shortDescription": {
+                "text": "Cloud resource deleted while DNS record remains active"
+              },
+              "helpUri": "https://subdomainwatch.com/guides/dns-takeover",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "dns",
+                  "takeover"
+                ]
+              }
+            },
+            {
+              "id": "SW-G-002",
+              "name": "DanglingCnamePointer",
+              "shortDescription": {
+                "text": "DNS record points to an unclaimed third-party cloud service"
+              },
+              "helpUri": "https://subdomainwatch.com/guides/dns-takeover",
+              "defaultConfiguration": {
+                "level": "error"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "dns",
+                  "takeover"
+                ]
+              }
+            },
+            {
+              "id": "SW-G-003",
+              "name": "ComputedTargetUnknownAtPlan",
+              "shortDescription": {
+                "text": "Dynamic computed DNS target flagged for Post-Apply Sentinel"
+              },
+              "helpUri": "https://subdomainwatch.com/guides/dns-takeover",
+              "defaultConfiguration": {
+                "level": "warning"
+              },
+              "properties": {
+                "tags": [
+                  "security",
+                  "dns",
+                  "sentinel"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "SW-G-003",
+          "level": "warning",
+          "message": {
+            "text": "WARNING: DNS record 'computed.acme.com' (aws_route53_record.computed) has dynamic computed targets unresolvable at plan time. Flagged for mandatory Post-Apply Sentinel verification."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "terraform/plan.json"
+                },
+                "region": {
+                  "startLine": 1,
+                  "startColumn": 1
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash": "ea405ab9e64b85c6c73ba4510a3b1544c52d1828296b2ed43e338efa112f5f4f"
+          }
+        }
+      ]
+    }
+  ]
+}

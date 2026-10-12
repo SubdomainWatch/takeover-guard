@@ -1,0 +1,64 @@
+name: 'SubdomainWatch Takeover Guard'
+description: 'Shift-left detection of dangling DNS records and subdomain takeovers in IaC Pull Requests'
+author: 'SubdomainWatch Core Security'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  plan_file:
+    description: 'Path to terraform plan in JSON format (e.g. tfplan.json)'
+    required: false
+    default: 'tfplan.json'
+  fail_on_severity:
+    description: 'Minimum severity to fail CI check: CRITICAL, HIGH, WARNING'
+    required: false
+    default: 'CRITICAL'
+  fail_mode:
+    description: 'Behavior on unexpected error or budget exhaustion: closed (fail build) or open (warn only)'
+    required: false
+    default: 'closed'
+  sarif_file:
+    description: 'Destination path for SARIF 2.1.0 report'
+    required: false
+    default: 'subdomainwatch-guard.sarif'
+  mode:
+    description: 'Execution mode: pre-merge or post-apply-sentinel'
+    required: false
+    default: 'pre-merge'
+  settle_delay:
+    description: 'Settle delay in seconds for DNS propagation in post-apply mode'
+    required: false
+    default: '45'
+  tf_dir:
+    description: 'Directory containing Terraform HCL files to inspect for in-code overrides'
+    required: false
+    default: '.'
+
+outputs:
+  sarif_file:
+    description: 'Path to generated SARIF report'
+  findings_count:
+    description: 'Number of active security findings detected'
+
+runs:
+  using: 'docker'
+  image: 'docker://ghcr.io/subdomainwatch/takeover-guard:v2'
+  args:
+    - '-plan'
+    - ${{ inputs.plan_file }}
+    - '-mode'
+    - ${{ inputs.mode }}
+    - '-fail-on-severity'
+    - ${{ inputs.fail_on_severity }}
+    - '-fail-mode'
+    - ${{ inputs.fail_mode }}
+    - '-sarif-file'
+    - ${{ inputs.sarif_file }}
+    - '-settle-delay'
+    - ${{ inputs.settle_delay }}
+    - '-tf-dir'
+    - ${{ inputs.tf_dir }}
+  env:
+    SUBDOMAINWATCH_API_KEY: ${{ secrets.SUBDOMAINWATCH_API_KEY }}
