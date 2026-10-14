@@ -254,4 +254,3 @@ resource "aws_route53_record" "ignored_record" {
 		t.Fatalf("expected 0 active findings due to override suppression, got %d", len(res.Findings))
 	}
 }
-
