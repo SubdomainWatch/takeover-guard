@@ -3,12 +3,15 @@ package localscan
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/subdomainwatch/takeover-guard/pkg/correlator"
@@ -18,28 +21,44 @@ import (
 var (
 	route53RecordRegex    = regexp.MustCompile(`(?i)^\s*resource\s+"aws_route53_record"\s+"([^"]+)"`)
 	cloudflareRecordRegex = regexp.MustCompile(`(?i)^\s*resource\s+"cloudflare_record"\s+"([^"]+)"`)
+	azureRecordRegex      = regexp.MustCompile(`(?i)^\s*resource\s+"azurerm_dns_(?:cname|a|txt)_record"\s+"([^"]+)"`)
+	gcpRecordRegex        = regexp.MustCompile(`(?i)^\s*resource\s+"google_dns_record_set"\s+"([^"]+)"`)
 	s3BucketRegex         = regexp.MustCompile(`(?i)^\s*resource\s+"aws_s3_bucket"\s+"([^"]+)"`)
 
-	nameAttrRegex      = regexp.MustCompile(`(?i)^\s*name\s*=\s*"([^"]+)"`)
-	typeAttrRegex      = regexp.MustCompile(`(?i)^\s*type\s*=\s*"([^"]+)"`)
-	recordsStartRegex  = regexp.MustCompile(`(?i)^\s*records\s*=\s*\[`)
-	quotedStringRegex  = regexp.MustCompile(`"([^",\s]+)"`)
-	contentAttrRegex   = regexp.MustCompile(`(?i)^\s*content\s*=\s*"([^"]+)"`)
-	bucketAttrRegex    = regexp.MustCompile(`(?i)^\s*bucket\s*=\s*"([^"]+)"`)
-	aliasBlockRegex    = regexp.MustCompile(`(?i)^\s*alias\s*\{`)
-	aliasNameAttrRegex = regexp.MustCompile(`(?i)^\s*(?:dns_name|name)\s*=\s*"([^"]+)"`)
+	aliasBlockRegex  = regexp.MustCompile(`(?i)^\s*alias\s*\{`)
+	aliasTargetRegex = regexp.MustCompile(`(?i)^\s*(?:dns_name|name)\s*=\s*"([^"]+)"`)
+
+	nameAttrRegex     = regexp.MustCompile(`(?i)^\s*name\s*=\s*"([^"]+)"`)
+	zoneNameAttrRegex = regexp.MustCompile(`(?i)^\s*zone_name\s*=\s*"([^"]+)"`)
+	recordAttrRegex   = regexp.MustCompile(`(?i)^\s*(?:record|value|cname|content)\s*=\s*"([^"]+)"`)
+	typeAttrRegex     = regexp.MustCompile(`(?i)^\s*type\s*=\s*"([^"]+)"`)
+	bucketAttrRegex   = regexp.MustCompile(`(?i)^\s*bucket\s*=\s*"([^"]+)"`)
+	listItemRegex     = regexp.MustCompile(`"([^"]+)"`)
 )
 
-type LocalRecord struct {
+// CandidateRecord represents a statically parsed DNS or storage resource from HCL.
+type CandidateRecord struct {
+	Provider     string
 	ResourceName string
-	ResourceType string
-	Domain       string
-	Target       string
+	Name         string
+	ZoneName     string
 	RecordType   string
+	Targets      []string
 	FilePath     string
-	StartLine    int
+	LineNumber   int
 }
 
+// LocalScanOptions configures the static workspace scan.
+type LocalScanOptions struct {
+	WorkspaceDir string
+	PlanJSONPath string
+	OverridePath string
+	Concurrency  int
+	Timeout      time.Duration
+	Prober       correlator.ProberInterface
+}
+
+// LocalScanResult holds the output of the local scanning engine.
 type LocalScanResult struct {
 	EvaluatedRecords int
 	Findings         []correlator.Finding
@@ -47,136 +66,161 @@ type LocalScanResult struct {
 	UsedPlan         bool
 }
 
-// RunLocalEngine executes a local developer audit:
-// 1. Attempts to use tfplan.json if present
-// 2. Attempts to generate a local speculative plan if terraform is available
-// 3. Falls back to static HCL parsing across local .tf files
-func RunLocalEngine(ctx context.Context, dir string, prober correlator.ProberInterface) (*LocalScanResult, error) {
-	// Check if a plan file exists locally
-	planPath := filepath.Join(dir, "tfplan.json")
-	if planBytes, err := os.ReadFile(planPath); err == nil {
-		findings, count, err := correlator.EvaluatePlanBytes(planBytes, prober)
-		if err == nil {
-			return &LocalScanResult{
-				EvaluatedRecords: count,
-				Findings:         findings,
-				UsedPlan:         true,
-				OverrideSnippets: generateSnippets(findings),
-			}, nil
-		}
+// RunLocalEngine performs a side-effect-free static audit of local HCL files
+// and optional pre-generated plan data, correlating results against active overrides.
+func RunLocalEngine(ctx context.Context, opts LocalScanOptions) (*LocalScanResult, error) {
+	if opts.WorkspaceDir == "" {
+		opts.WorkspaceDir = "."
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 4
+	}
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
 	}
 
-	// Try speculative local plan if terraform binary is present
-	if tfBinary, err := exec.LookPath("terraform"); err == nil {
-		speculativePlan, err := generateSpeculativePlan(ctx, tfBinary, dir)
-		if err == nil && len(speculativePlan) > 0 {
-			findings, count, err := correlator.EvaluatePlanBytes(speculativePlan, prober)
-			if err == nil {
-				return &LocalScanResult{
-					EvaluatedRecords: count,
-					Findings:         findings,
-					UsedPlan:         true,
-					OverrideSnippets: generateSnippets(findings),
-				}, nil
+	var tfFiles []string
+	err := filepath.WalkDir(opts.WorkspaceDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" || name == ".terraform" || name == "node_modules" || name == "vendor" {
+				return filepath.SkipDir
 			}
-		} else if err != nil {
-			fmt.Printf("ℹ Speculative plan skipped or failed (%v), falling back to static HCL scan\n", err)
-		}
-	}
-
-	// Fallback: Static HCL parser across all .tf files in directory
-	return scanHCLFiles(dir, prober)
-}
-
-func scanHCLFiles(dir string, prober correlator.ProberInterface) (*LocalScanResult, error) {
-	var records []LocalRecord
-	localBuckets := make(map[string]bool)
-
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".tf") {
 			return nil
 		}
-
-		fileRecords, buckets, err := parseTFFile(path)
-		if err == nil {
-			records = append(records, fileRecords...)
-			for b := range buckets {
-				localBuckets[b] = true
-			}
+		if strings.HasSuffix(strings.ToLower(d.Name()), ".tf") {
+			tfFiles = append(tfFiles, path)
 		}
 		return nil
 	})
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan terraform files: %w", err)
+		return nil, fmt.Errorf("walking workspace %s: %w", opts.WorkspaceDir, err)
 	}
 
-	// Audit in-code overrides
+	fileCh := make(chan string, len(tfFiles))
+	for _, f := range tfFiles {
+		fileCh <- f
+	}
+	close(fileCh)
+
+	var (
+		mu         sync.Mutex
+		candidates []CandidateRecord
+		wg         sync.WaitGroup
+		firstErr   error
+	)
+
+	for i := 0; i < opts.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range fileCh {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				parsed, scanErr := parseHCLFile(path)
+				mu.Lock()
+				if scanErr != nil && firstErr == nil {
+					firstErr = scanErr
+				}
+				candidates = append(candidates, parsed...)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	var (
+		plan     correlator.PlanJSON
+		usedPlan bool
+	)
+
+	planPath := opts.PlanJSONPath
+	if planPath == "" {
+		candidatePlanPath := filepath.Join(opts.WorkspaceDir, "tfplan.json")
+		if _, err := os.Stat(candidatePlanPath); err == nil {
+			planPath = candidatePlanPath
+		}
+	}
+
+	if planPath != "" {
+		if planBytes, err := os.ReadFile(planPath); err == nil {
+			if err := json.Unmarshal(planBytes, &plan); err == nil {
+				usedPlan = true
+			}
+		}
+	}
+
+	candidatePlan := candidateRecordsToPlan(candidates)
+	existingAddresses := make(map[string]bool)
+	for _, rc := range plan.ResourceChanges {
+		existingAddresses[rc.Address] = true
+	}
+	for _, rc := range candidatePlan.ResourceChanges {
+		if !existingAddresses[rc.Address] {
+			plan.ResourceChanges = append(plan.ResourceChanges, rc)
+		}
+	}
+
+	findings, evaluatedCount, err := correlator.EvaluatePlan(&plan, opts.Prober)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating plan: %w", err)
+	}
+
+	candByAddress := make(map[string]CandidateRecord)
+	candByFQDN := make(map[string]CandidateRecord)
+	for _, c := range candidates {
+		addr := fmt.Sprintf("%s.%s", c.Provider, c.ResourceName)
+		candByAddress[addr] = c
+		switch c.Provider {
+		case "aws_route53":
+			candByAddress[fmt.Sprintf("aws_route53_record.%s", c.ResourceName)] = c
+		case "cloudflare":
+			candByAddress[fmt.Sprintf("cloudflare_record.%s", c.ResourceName)] = c
+		case "azure_dns":
+			candByAddress[fmt.Sprintf("azurerm_dns_cname_record.%s", c.ResourceName)] = c
+		case "gcp_dns":
+			candByAddress[fmt.Sprintf("google_dns_record_set.%s", c.ResourceName)] = c
+		}
+		if c.Name != "" {
+			candByFQDN[correlator.NormalizeDomain(c.Name)] = c
+		}
+	}
+
+	for i := range findings {
+		if c, ok := candByAddress[findings[i].Address]; ok {
+			findings[i].SourceFile = c.FilePath
+			findings[i].StartLine = c.LineNumber
+		} else if c, ok := candByFQDN[findings[i].FQDN]; ok {
+			findings[i].SourceFile = c.FilePath
+			findings[i].StartLine = c.LineNumber
+		}
+	}
+
 	auditor := override.NewOverrideAuditor()
-	if err := auditor.ScanDirectory(dir); err != nil {
+	overrideDir := opts.WorkspaceDir
+	if opts.OverridePath != "" {
+		overrideDir = opts.OverridePath
+	}
+	if err := auditor.ScanDirectory(overrideDir); err != nil {
 		return nil, fmt.Errorf("in-code override validation failure: %w", err)
 	}
 
-	var findings []correlator.Finding
-
-	for _, rec := range records {
-		normTarget := correlator.NormalizeDomain(rec.Target)
-		normFQDN := correlator.NormalizeDomain(rec.Domain)
-
-		if normTarget == "" || normFQDN == "" {
-			continue
-		}
-
-		provider, identifier := correlator.ExtractCloudTargetIdentity(normTarget)
-
-		// Rule 1: S3 bucket target check against local repo buckets
-		if provider == "s3" && identifier != "" {
-			if localBuckets[identifier] {
-				// Bucket is actively managed in this local repository, safe!
-				continue
-			}
-			if prober != nil {
-				// Probe if unmanaged external target bucket is claimable
-				isVuln, sev, rem := prober.ProbeClaimability(normFQDN, normTarget)
-				if isVuln {
-					findings = append(findings, correlator.Finding{
-						RuleID:     correlator.RuleDanglingPointer,
-						Severity:   sev,
-						FQDN:       normFQDN,
-						Target:     normTarget,
-						Address:    fmt.Sprintf("%s.%s", rec.ResourceType, rec.ResourceName),
-						SourceFile: rec.FilePath,
-						StartLine:  rec.StartLine,
-						Reason:     rem,
-					})
-				}
-			}
-			continue
-		}
-
-		// Rule 2: General cloud provider target
-		if prober != nil && prober.IsCloudProviderTarget(normTarget) {
-			if correlator.IsPrivateTarget(normTarget) {
-				continue
-			}
-
-			isVuln, sev, rem := prober.ProbeClaimability(normFQDN, normTarget)
-			if isVuln {
-				findings = append(findings, correlator.Finding{
-					RuleID:     correlator.RuleDanglingPointer,
-					Severity:   sev,
-					FQDN:       normFQDN,
-					Target:     normTarget,
-					Address:    fmt.Sprintf("%s.%s", rec.ResourceType, rec.ResourceName),
-					SourceFile: rec.FilePath,
-					StartLine:  rec.StartLine,
-					Reason:     rem,
-				})
-			}
-		}
-	}
-
-	// Filter findings against overrides
 	var activeFindings []correlator.Finding
 	for _, f := range findings {
 		ignored, _ := auditor.IsIgnored(f.RuleID, f.FQDN)
@@ -186,158 +230,242 @@ func scanHCLFiles(dir string, prober correlator.ProberInterface) (*LocalScanResu
 	}
 
 	return &LocalScanResult{
-		EvaluatedRecords: len(records),
+		EvaluatedRecords: evaluatedCount,
 		Findings:         activeFindings,
 		OverrideSnippets: generateSnippets(activeFindings),
-		UsedPlan:         false,
+		UsedPlan:         usedPlan,
 	}, nil
 }
 
-func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
+func candidateRecordsToPlan(candidates []CandidateRecord) *correlator.PlanJSON {
+	plan := &correlator.PlanJSON{}
+	for _, c := range candidates {
+		if c.Provider == "aws_s3" || c.RecordType == "S3_BUCKET" {
+			bucketName := c.Name
+			if bucketName == "" {
+				bucketName = c.ResourceName
+			}
+			plan.ResourceChanges = append(plan.ResourceChanges, correlator.ResourceChange{
+				Address: fmt.Sprintf("aws_s3_bucket.%s", c.ResourceName),
+				Type:    "aws_s3_bucket",
+				Name:    c.ResourceName,
+				Change: correlator.ChangeObj{
+					Actions: []string{"no-op"},
+					After: map[string]any{
+						"bucket": bucketName,
+					},
+				},
+			})
+			continue
+		}
+
+		for _, target := range c.Targets {
+			switch c.Provider {
+			case "aws_route53":
+				after := map[string]any{
+					"name": c.Name,
+					"type": c.RecordType,
+				}
+				if strings.EqualFold(c.RecordType, "CNAME") || c.RecordType == "" {
+					after["type"] = "CNAME"
+					after["records"] = []any{target}
+				} else {
+					after["alias"] = map[string]any{
+						"dns_name": target,
+					}
+				}
+				plan.ResourceChanges = append(plan.ResourceChanges, correlator.ResourceChange{
+					Address: fmt.Sprintf("aws_route53_record.%s", c.ResourceName),
+					Type:    "aws_route53_record",
+					Name:    c.ResourceName,
+					Change: correlator.ChangeObj{
+						Actions: []string{"no-op"},
+						After:   after,
+					},
+				})
+
+			case "cloudflare":
+				recType := c.RecordType
+				if recType == "" {
+					recType = "CNAME"
+				}
+				plan.ResourceChanges = append(plan.ResourceChanges, correlator.ResourceChange{
+					Address: fmt.Sprintf("cloudflare_record.%s", c.ResourceName),
+					Type:    "cloudflare_record",
+					Name:    c.ResourceName,
+					Change: correlator.ChangeObj{
+						Actions: []string{"no-op"},
+						After: map[string]any{
+							"name":    c.Name,
+							"type":    recType,
+							"content": target,
+						},
+					},
+				})
+
+			case "azure_dns":
+				plan.ResourceChanges = append(plan.ResourceChanges, correlator.ResourceChange{
+					Address: fmt.Sprintf("azurerm_dns_cname_record.%s", c.ResourceName),
+					Type:    "azurerm_dns_cname_record",
+					Name:    c.ResourceName,
+					Change: correlator.ChangeObj{
+						Actions: []string{"no-op"},
+						After: map[string]any{
+							"name":      c.Name,
+							"zone_name": c.ZoneName,
+							"record":    target,
+						},
+					},
+				})
+
+			case "gcp_dns":
+				name := c.Name
+				if !strings.HasSuffix(name, ".") {
+					name += "."
+				}
+				recType := c.RecordType
+				if recType == "" {
+					recType = "CNAME"
+				}
+				plan.ResourceChanges = append(plan.ResourceChanges, correlator.ResourceChange{
+					Address: fmt.Sprintf("google_dns_record_set.%s", c.ResourceName),
+					Type:    "google_dns_record_set",
+					Name:    c.ResourceName,
+					Change: correlator.ChangeObj{
+						Actions: []string{"no-op"},
+						After: map[string]any{
+							"name":    name,
+							"type":    recType,
+							"rrdatas": []any{target},
+						},
+					},
+				})
+			}
+		}
+	}
+	return plan
+}
+
+func parseHCLFile(path string) ([]CandidateRecord, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
 
+	var (
+		results         []CandidateRecord
+		current         *CandidateRecord
+		braceDepth      int
+		inRecords       bool
+		inAlias         bool
+		aliasBraceDepth int
+		lineNum         int
+	)
+
 	scanner := bufio.NewScanner(f)
-	var records []LocalRecord
-	buckets := make(map[string]bool)
-
-	var currentRecord *LocalRecord
-	lineNum := 0
-	inBlock := false
-	braceCount := 0
-	inAliasBlock := false
-	aliasBraceCount := 0
-	inRecordsArray := false
-
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
 
-		if s3Match := s3BucketRegex.FindStringSubmatch(line); s3Match != nil {
-			inBlock = true
-			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
 			continue
 		}
 
-		if r53Match := route53RecordRegex.FindStringSubmatch(line); r53Match != nil {
-			currentRecord = &LocalRecord{
-				ResourceType: "aws_route53_record",
-				ResourceName: r53Match[1],
-				FilePath:     path,
-				StartLine:    lineNum,
+		if current == nil {
+			if provider, resName, ok := matchResourceHeader(line); ok {
+				current = &CandidateRecord{
+					Provider:     provider,
+					ResourceName: resName,
+					FilePath:     path,
+					LineNumber:   lineNum,
+				}
+				braceDepth = strings.Count(line, "{") - strings.Count(line, "}")
+				if braceDepth <= 0 {
+					braceDepth = 1
+				}
 			}
-			inBlock = true
-			inAliasBlock = false
-			aliasBraceCount = 0
-			inRecordsArray = false
-			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
 			continue
 		}
 
-		if cfMatch := cloudflareRecordRegex.FindStringSubmatch(line); cfMatch != nil {
-			currentRecord = &LocalRecord{
-				ResourceType: "cloudflare_record",
-				ResourceName: cfMatch[1],
-				FilePath:     path,
-				StartLine:    lineNum,
+		if aliasBlockRegex.MatchString(line) {
+			inAlias = true
+			aliasBraceDepth = strings.Count(line, "{") - strings.Count(line, "}")
+			if m := aliasTargetRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.Targets = append(current.Targets, m[1])
 			}
-			inBlock = true
-			inAliasBlock = false
-			aliasBraceCount = 0
-			inRecordsArray = false
-			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
-			continue
+		} else if inAlias {
+			aliasBraceDepth += strings.Count(line, "{") - strings.Count(line, "}")
+			if m := aliasTargetRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.Targets = append(current.Targets, m[1])
+			}
+			if aliasBraceDepth <= 0 {
+				inAlias = false
+			}
+		} else {
+			if m := nameAttrRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.Name = m[1]
+			} else if m := zoneNameAttrRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.ZoneName = m[1]
+			} else if m := typeAttrRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.RecordType = strings.ToUpper(m[1])
+			} else if m := bucketAttrRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.Name = m[1]
+				current.RecordType = "S3_BUCKET"
+			} else if m := recordAttrRegex.FindStringSubmatch(line); len(m) > 1 {
+				current.Targets = append(current.Targets, m[1])
+			}
 		}
 
-		if inBlock {
-			braceCount += strings.Count(line, "{") - strings.Count(line, "}")
-
-			if bMatch := bucketAttrRegex.FindStringSubmatch(line); bMatch != nil {
-				buckets[strings.ToLower(strings.TrimSpace(bMatch[1]))] = true
-			}
-
-			if currentRecord != nil {
-				// Check for alias block start (§6.4 & P1-1)
-				if aliasBlockRegex.MatchString(line) {
-					inAliasBlock = true
-					aliasBraceCount = strings.Count(line, "{") - strings.Count(line, "}")
-				} else if inAliasBlock {
-					aliasBraceCount += strings.Count(line, "{") - strings.Count(line, "}")
-				}
-
-				if inAliasBlock {
-					if aMatch := aliasNameAttrRegex.FindStringSubmatch(line); aMatch != nil {
-						currentRecord.Target = aMatch[1]
-					}
-					if aliasBraceCount <= 0 {
-						inAliasBlock = false
-					}
-				} else {
-					// Top-level attributes outside alias block
-					if nMatch := nameAttrRegex.FindStringSubmatch(line); nMatch != nil {
-						currentRecord.Domain = nMatch[1]
-					}
-					if tMatch := typeAttrRegex.FindStringSubmatch(line); tMatch != nil {
-						currentRecord.RecordType = tMatch[1]
-					}
-					if cMatch := contentAttrRegex.FindStringSubmatch(line); cMatch != nil {
-						currentRecord.Target = cMatch[1]
-					}
-
-					// Multi-line and single-line records array parsing (P0-1)
-					if recordsStartRegex.MatchString(line) {
-						matches := quotedStringRegex.FindAllStringSubmatch(line, -1)
-						if len(matches) > 0 {
-							currentRecord.Target = matches[0][1]
-						}
-						if !strings.Contains(line, "]") {
-							inRecordsArray = true
-						}
-					} else if inRecordsArray {
-						matches := quotedStringRegex.FindAllStringSubmatch(line, -1)
-						if len(matches) > 0 && currentRecord.Target == "" {
-							currentRecord.Target = matches[0][1]
-						}
-						if strings.Contains(line, "]") {
-							inRecordsArray = false
-						}
-					}
+		if (strings.Contains(trimmed, "records") || strings.Contains(trimmed, "rrdatas")) && strings.Contains(trimmed, "[") {
+			inRecords = true
+		}
+		if inRecords {
+			matches := listItemRegex.FindAllStringSubmatch(line, -1)
+			for _, m := range matches {
+				if len(m) > 1 && m[1] != "records" && m[1] != "rrdatas" {
+					current.Targets = append(current.Targets, m[1])
 				}
 			}
-
-			if braceCount <= 0 {
-				inBlock = false
-				inAliasBlock = false
-				inRecordsArray = false
-				if currentRecord != nil {
-					if currentRecord.Domain != "" && currentRecord.Target != "" {
-						records = append(records, *currentRecord)
-					}
-					currentRecord = nil
-				}
+			if strings.Contains(trimmed, "]") {
+				inRecords = false
 			}
+		}
+
+		braceDepth += strings.Count(line, "{") - strings.Count(line, "}")
+		if braceDepth <= 0 {
+			results = append(results, *current)
+			current = nil
+			inRecords = false
+			inAlias = false
 		}
 	}
 
-	return records, buckets, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning %s: %w", path, err)
+	}
+
+	return results, nil
 }
 
-func generateSpeculativePlan(ctx context.Context, tfBinary, dir string) ([]byte, error) {
-	planOut := filepath.Join(dir, ".guard-speculative.tfplan")
-	defer os.Remove(planOut)
-
-	cmdPlan := exec.CommandContext(ctx, tfBinary, "plan", "-refresh=false", "-out="+planOut)
-	cmdPlan.Dir = dir
-	if err := cmdPlan.Run(); err != nil {
-		return nil, err
+func matchResourceHeader(line string) (provider string, resourceName string, ok bool) {
+	if m := route53RecordRegex.FindStringSubmatch(line); len(m) > 1 {
+		return "aws_route53", m[1], true
 	}
-
-	cmdShow := exec.CommandContext(ctx, tfBinary, "show", "-json", planOut)
-	cmdShow.Dir = dir
-	return cmdShow.Output()
+	if m := cloudflareRecordRegex.FindStringSubmatch(line); len(m) > 1 {
+		return "cloudflare", m[1], true
+	}
+	if m := azureRecordRegex.FindStringSubmatch(line); len(m) > 1 {
+		return "azure_dns", m[1], true
+	}
+	if m := gcpRecordRegex.FindStringSubmatch(line); len(m) > 1 {
+		return "gcp_dns", m[1], true
+	}
+	if m := s3BucketRegex.FindStringSubmatch(line); len(m) > 1 {
+		return "aws_s3", m[1], true
+	}
+	return "", "", false
 }
 
 func generateSnippets(findings []correlator.Finding) map[string]string {
@@ -345,24 +473,24 @@ func generateSnippets(findings []correlator.Finding) map[string]string {
 	expiryDate := time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02")
 	user := "@developer"
 
-	// Try getting git username
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	// Only query git config --global so local .git/config files in scanned directories are never read or evaluated
+	if out, err := exec.Command("git", "config", "--global", "user.email").Output(); err == nil {
 		trimmed := strings.TrimSpace(string(out))
-		if trimmed != "" {
-			if strings.Contains(trimmed, "@") {
-				parts := strings.Split(trimmed, "@")
-				user = "@" + strings.ToLower(parts[0])
-			} else {
-				user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
-			}
+		if trimmed != "" && strings.Contains(trimmed, "@") {
+			parts := strings.Split(trimmed, "@")
+			user = "@" + strings.ToLower(parts[0])
 		}
 	}
 	if user == "@developer" {
-		if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+		if out, err := exec.Command("git", "config", "--global", "user.name").Output(); err == nil {
 			trimmed := strings.TrimSpace(string(out))
-			if trimmed != "" && strings.Contains(trimmed, "@") {
-				parts := strings.Split(trimmed, "@")
-				user = "@" + strings.ToLower(parts[0])
+			if trimmed != "" {
+				if strings.Contains(trimmed, "@") {
+					parts := strings.Split(trimmed, "@")
+					user = "@" + strings.ToLower(parts[0])
+				} else {
+					user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
+				}
 			}
 		}
 	}

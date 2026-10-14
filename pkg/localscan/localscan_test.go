@@ -54,7 +54,10 @@ resource "aws_route53_record" "dangling_record" {
 		isVuln:  true,
 	}
 
-	res, err := RunLocalEngine(context.Background(), tmpDir, prober)
+	res, err := RunLocalEngine(context.Background(), LocalScanOptions{
+		WorkspaceDir: tmpDir,
+		Prober:       prober,
+	})
 	if err != nil {
 		t.Fatalf("local engine failed: %v", err)
 	}
@@ -121,7 +124,10 @@ resource "aws_route53_record" "alias_record" {
 		isVuln:  true,
 	}
 
-	res, err := RunLocalEngine(context.Background(), tmpDir, prober)
+	res, err := RunLocalEngine(context.Background(), LocalScanOptions{
+		WorkspaceDir: tmpDir,
+		Prober:       prober,
+	})
 	if err != nil {
 		t.Fatalf("local engine failed: %v", err)
 	}
@@ -152,3 +158,100 @@ resource "aws_route53_record" "alias_record" {
 		t.Errorf("expected finding for alias.acme.com with target unmanaged-alias.s3-website-us-east-1.amazonaws.com")
 	}
 }
+
+func TestLocalScanWithPlanJSON(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "guard-plan-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	planJSON := `{
+  "resource_changes": [
+    {
+      "address": "aws_route53_record.from_plan",
+      "type": "aws_route53_record",
+      "change": {
+        "actions": ["create"],
+        "after": {
+          "name": "plan.acme.com",
+          "type": "CNAME",
+          "records": ["unmanaged-bucket.s3.amazonaws.com"]
+        }
+      }
+    }
+  ]
+}`
+	planPath := filepath.Join(tmpDir, "speculative.json")
+	if err := os.WriteFile(planPath, []byte(planJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prober := &mockLocalProber{
+		isCloud: true,
+		isVuln:  true,
+	}
+
+	res, err := RunLocalEngine(context.Background(), LocalScanOptions{
+		WorkspaceDir: tmpDir,
+		PlanJSONPath: planPath,
+		Prober:       prober,
+	})
+	if err != nil {
+		t.Fatalf("local engine failed: %v", err)
+	}
+
+	if !res.UsedPlan {
+		t.Errorf("expected UsedPlan to be true")
+	}
+	if len(res.Findings) != 1 {
+		t.Fatalf("expected 1 finding from plan, got %d", len(res.Findings))
+	}
+	if res.Findings[0].FQDN != "plan.acme.com" {
+		t.Errorf("expected plan.acme.com, got %s", res.Findings[0].FQDN)
+	}
+}
+
+func TestLocalScanWithOverrideFilter(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "guard-override-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Valid in-code ignore comment preceding dangling record
+	tfContent := `# subdomainwatch-ignore: SW-G-002 domain=ignored.acme.com expires=2026-11-01 approver=@security reason="Accepted test risk"
+resource "aws_route53_record" "ignored_record" {
+  name    = "ignored.acme.com"
+  type    = "CNAME"
+  records = ["unmanaged-bucket.s3.amazonaws.com"]
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(tfContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prober := &mockLocalProber{
+		isCloud: true,
+		isVuln:  true,
+	}
+
+	res, err := RunLocalEngine(context.Background(), LocalScanOptions{
+		WorkspaceDir: tmpDir,
+		Prober:       prober,
+	})
+	if err != nil {
+		t.Fatalf("local engine failed: %v", err)
+	}
+
+	// EvaluatedRecords should still count 1 record
+	if res.EvaluatedRecords != 1 {
+		t.Errorf("expected 1 evaluated record, got %d", res.EvaluatedRecords)
+	}
+
+	// Finding should be filtered out by override
+	if len(res.Findings) != 0 {
+		t.Fatalf("expected 0 active findings due to override suppression, got %d", len(res.Findings))
+	}
+}
+

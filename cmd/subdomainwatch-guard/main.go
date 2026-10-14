@@ -100,7 +100,15 @@ func main() {
 	planFileExists := fileExists(planFile)
 	if localMode || (!planFileExists && isTFDir(tfDir)) {
 		fmt.Printf("🔍 Running Local Developer Pre-Commit Engine in '%s'...\n", tfDir)
-		localRes, err := localscan.RunLocalEngine(ctx, tfDir, claimProber)
+		var planPath string
+		if planFileExists {
+			planPath = planFile
+		}
+		localRes, err := localscan.RunLocalEngine(ctx, localscan.LocalScanOptions{
+			WorkspaceDir: tfDir,
+			PlanJSONPath: planPath,
+			Prober:       claimProber,
+		})
 		if err != nil {
 			exitConfigFail(failMode, "Error during local scan: %v\n", err)
 		}

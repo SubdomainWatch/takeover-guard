@@ -10,7 +10,7 @@ inputs:
   plan_file:
     description: 'Path to terraform plan in JSON format (e.g. tfplan.json)'
     required: false
-    default: 'tfplan.json'
+    default: ''
   fail_on_severity:
     description: 'Minimum severity to fail CI check: CRITICAL, HIGH, WARNING'
     required: false
