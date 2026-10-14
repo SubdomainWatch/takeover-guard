@@ -34,7 +34,8 @@ func main() {
 		syncURL        string
 	)
 
-	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON")
+	flag.StringVar(&planFile, "plan-file", "tfplan.json", "Path to terraform plan JSON")
+	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON (alias for -plan-file)")
 	flag.StringVar(&mode, "mode", "pre-merge", "Execution mode: pre-merge, post-apply-sentinel, or pre-commit")
 	flag.StringVar(&failOnSeverity, "fail-on-severity", "CRITICAL", "Minimum severity to fail build: CRITICAL, HIGH, WARNING")
 	flag.StringVar(&failMode, "fail-mode", "closed", "Behavior on failure: closed (fail build) or open (warn only)")
@@ -100,7 +101,15 @@ func main() {
 	planFileExists := fileExists(planFile)
 	if localMode || (!planFileExists && isTFDir(tfDir)) {
 		fmt.Printf("🔍 Running Local Developer Pre-Commit Engine in '%s'...\n", tfDir)
-		localRes, err := localscan.RunLocalEngine(ctx, tfDir, claimProber)
+		var planPath string
+		if planFileExists {
+			planPath = planFile
+		}
+		localRes, err := localscan.RunLocalEngine(ctx, localscan.LocalScanOptions{
+			WorkspaceDir: tfDir,
+			PlanJSONPath: planPath,
+			Prober:       claimProber,
+		})
 		if err != nil {
 			exitConfigFail(failMode, "Error during local scan: %v\n", err)
 		}
@@ -225,7 +234,7 @@ func main() {
 			CommitSHA:            envInfo.CommitSHA,
 			PRNumber:             envInfo.PRNumber,
 			Mode:                 mode,
-			ToolVersion:          "2.1.0",
+			ToolVersion:          "2.2.0",
 			Timestamp:            time.Now().UTC().Format(time.RFC3339),
 			Status:               status,
 			TotalModifiedRecords: totalModified,

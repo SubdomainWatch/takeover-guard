@@ -322,7 +322,7 @@ func (p *Prober) executeSafeProbe(host string) (int, string, string, http.Header
 
 	// Hardened safe headers: 16KB Range header to avoid reading massive payloads
 	req.Header.Set("Range", "bytes=0-16383")
-	req.Header.Set("User-Agent", "SubdomainWatch-Takeover-Guard/2.1.0")
+	req.Header.Set("User-Agent", "SubdomainWatch-Takeover-Guard/2.2.0")
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {

@@ -163,7 +163,7 @@ func SyncTelemetry(ctx context.Context, syncURL, apiKey string, payload *SyncPay
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("User-Agent", "SubdomainWatch-Guard/2.1.0")
+	req.Header.Set("User-Agent", "SubdomainWatch-Guard/2.2.0")
 
 	client := &http.Client{
 		Timeout: 5 * time.Second,
