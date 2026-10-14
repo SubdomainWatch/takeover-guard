@@ -18,13 +18,17 @@ import (
 var (
 	route53RecordRegex    = regexp.MustCompile(`(?i)^\s*resource\s+"aws_route53_record"\s+"([^"]+)"`)
 	cloudflareRecordRegex = regexp.MustCompile(`(?i)^\s*resource\s+"cloudflare_record"\s+"([^"]+)"`)
+	azureRecordRegex      = regexp.MustCompile(`(?i)^\s*resource\s+"azurerm_dns_(?:cname|a|txt)_record"\s+"([^"]+)"`)
+	gcpRecordRegex        = regexp.MustCompile(`(?i)^\s*resource\s+"google_dns_record_set"\s+"([^"]+)"`)
 	s3BucketRegex         = regexp.MustCompile(`(?i)^\s*resource\s+"aws_s3_bucket"\s+"([^"]+)"`)
 
 	nameAttrRegex      = regexp.MustCompile(`(?i)^\s*name\s*=\s*"([^"]+)"`)
+	zoneNameAttrRegex  = regexp.MustCompile(`(?i)^\s*zone_name\s*=\s*"([^"]+)"`)
 	typeAttrRegex      = regexp.MustCompile(`(?i)^\s*type\s*=\s*"([^"]+)"`)
 	recordsStartRegex  = regexp.MustCompile(`(?i)^\s*records\s*=\s*\[`)
 	quotedStringRegex  = regexp.MustCompile(`"([^",\s]+)"`)
 	contentAttrRegex   = regexp.MustCompile(`(?i)^\s*content\s*=\s*"([^"]+)"`)
+	recordAttrRegex    = regexp.MustCompile(`(?i)^\s*(?:record|value|cname)\s*=\s*"([^"]+)"`)
 	bucketAttrRegex    = regexp.MustCompile(`(?i)^\s*bucket\s*=\s*"([^"]+)"`)
 	aliasBlockRegex    = regexp.MustCompile(`(?i)^\s*alias\s*\{`)
 	aliasNameAttrRegex = regexp.MustCompile(`(?i)^\s*(?:dns_name|name)\s*=\s*"([^"]+)"`)
@@ -48,20 +52,30 @@ type LocalScanResult struct {
 }
 
 // RunLocalEngine executes a local developer audit:
-// 1. Attempts to use tfplan.json if present
-// 2. Attempts to generate a local speculative plan if terraform is available
-// 3. Falls back to static HCL parsing across local .tf files
+// 1. Checks for an explicit tfplan.json file first and evaluates it via EvaluatePlanBytes
+// 2. Otherwise falls back to scanHCLFiles to statically parse .tf files without invoking terraform
 func RunLocalEngine(ctx context.Context, dir string, prober correlator.ProberInterface) (*LocalScanResult, error) {
-	// Check if a plan file exists locally
+	// Check if an explicit tfplan.json file exists locally
 	planPath := filepath.Join(dir, "tfplan.json")
 	if planBytes, err := os.ReadFile(planPath); err == nil {
 		findings, count, err := correlator.EvaluatePlanBytes(planBytes, prober)
 		if err == nil {
+			auditor := override.NewOverrideAuditor()
+			_ = auditor.ScanDirectory(dir)
+
+			var activeFindings []correlator.Finding
+			for _, f := range findings {
+				ignored, _ := auditor.IsIgnored(f.RuleID, f.FQDN)
+				if !ignored {
+					activeFindings = append(activeFindings, f)
+				}
+			}
+
 			return &LocalScanResult{
 				EvaluatedRecords: count,
-				Findings:         findings,
+				Findings:         activeFindings,
 				UsedPlan:         true,
-				OverrideSnippets: generateSnippets(findings),
+				OverrideSnippets: generateSnippets(activeFindings),
 			}, nil
 		}
 	}
@@ -234,6 +248,36 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 			continue
 		}
 
+		if azMatch := azureRecordRegex.FindStringSubmatch(line); azMatch != nil {
+			currentRecord = &LocalRecord{
+				ResourceType: "azurerm_dns_cname_record",
+				ResourceName: azMatch[1],
+				FilePath:     path,
+				StartLine:    lineNum,
+			}
+			inBlock = true
+			inAliasBlock = false
+			aliasBraceCount = 0
+			inRecordsArray = false
+			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
+			continue
+		}
+
+		if gcpMatch := gcpRecordRegex.FindStringSubmatch(line); gcpMatch != nil {
+			currentRecord = &LocalRecord{
+				ResourceType: "google_dns_record_set",
+				ResourceName: gcpMatch[1],
+				FilePath:     path,
+				StartLine:    lineNum,
+			}
+			inBlock = true
+			inAliasBlock = false
+			aliasBraceCount = 0
+			inRecordsArray = false
+			braceCount = strings.Count(line, "{") - strings.Count(line, "}")
+			continue
+		}
+
 		if inBlock {
 			braceCount += strings.Count(line, "{") - strings.Count(line, "}")
 
@@ -262,15 +306,23 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 					if nMatch := nameAttrRegex.FindStringSubmatch(line); nMatch != nil {
 						currentRecord.Domain = nMatch[1]
 					}
+					if zMatch := zoneNameAttrRegex.FindStringSubmatch(line); zMatch != nil {
+						if currentRecord.Domain != "" && !strings.Contains(currentRecord.Domain, ".") {
+							currentRecord.Domain = currentRecord.Domain + "." + zMatch[1]
+						}
+					}
 					if tMatch := typeAttrRegex.FindStringSubmatch(line); tMatch != nil {
 						currentRecord.RecordType = tMatch[1]
 					}
 					if cMatch := contentAttrRegex.FindStringSubmatch(line); cMatch != nil {
 						currentRecord.Target = cMatch[1]
 					}
+					if rMatch := recordAttrRegex.FindStringSubmatch(line); rMatch != nil {
+						currentRecord.Target = rMatch[1]
+					}
 
-					// Multi-line and single-line records array parsing (P0-1)
-					if recordsStartRegex.MatchString(line) {
+					// Multi-line and single-line records/rrdatas array parsing (P0-1)
+					if recordsStartRegex.MatchString(line) || strings.Contains(line, "rrdatas") {
 						matches := quotedStringRegex.FindAllStringSubmatch(line, -1)
 						if len(matches) > 0 {
 							currentRecord.Target = matches[0][1]
@@ -312,24 +364,25 @@ func generateSnippets(findings []correlator.Finding) map[string]string {
 	expiryDate := time.Now().UTC().AddDate(0, 0, 30).Format("2006-01-02")
 	user := "@developer"
 
-	// Try getting git username
-	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+	// Only query git config --global so local .git/config files in scanned directories are never read or evaluated
+	if out, err := exec.Command("git", "config", "--global", "user.email").Output(); err == nil {
 		trimmed := strings.TrimSpace(string(out))
-		if trimmed != "" {
-			if strings.Contains(trimmed, "@") {
-				parts := strings.Split(trimmed, "@")
-				user = "@" + strings.ToLower(parts[0])
-			} else {
-				user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
-			}
+		if trimmed != "" && strings.Contains(trimmed, "@") {
+			parts := strings.Split(trimmed, "@")
+			user = "@" + strings.ToLower(parts[0])
 		}
 	}
+
 	if user == "@developer" {
-		if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+		if out, err := exec.Command("git", "config", "--global", "user.name").Output(); err == nil {
 			trimmed := strings.TrimSpace(string(out))
-			if trimmed != "" && strings.Contains(trimmed, "@") {
-				parts := strings.Split(trimmed, "@")
-				user = "@" + strings.ToLower(parts[0])
+			if trimmed != "" {
+				if strings.Contains(trimmed, "@") {
+					parts := strings.Split(trimmed, "@")
+					user = "@" + strings.ToLower(parts[0])
+				} else {
+					user = "@" + strings.ToLower(strings.ReplaceAll(trimmed, " ", "-"))
+				}
 			}
 		}
 	}

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/subdomainwatch/takeover-guard/pkg/correlator"
 )
 
 type mockLocalProber struct {
@@ -150,5 +152,179 @@ resource "aws_route53_record" "alias_record" {
 	}
 	if !foundAlias {
 		t.Errorf("expected finding for alias.acme.com with target unmanaged-alias.s3-website-us-east-1.amazonaws.com")
+	}
+}
+
+func TestRunLocalEngine_SupportedProviders(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "guard-providers-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tfContent := `
+resource "aws_route53_record" "aws_rec" {
+  name    = "aws.example.com"
+  type    = "CNAME"
+  records = ["unmanaged-aws.s3.amazonaws.com"]
+}
+
+resource "cloudflare_record" "cf_rec" {
+  name    = "cf.example.com"
+  type    = "CNAME"
+  content = "unmanaged-cf.s3.amazonaws.com"
+}
+
+resource "azurerm_dns_cname_record" "azure_rec" {
+  name                = "azure"
+  zone_name           = "example.com"
+  record              = "unmanaged-azure.azurewebsites.net"
+  resource_group_name = "rg-dns"
+}
+
+resource "google_dns_record_set" "gcp_rec" {
+  name         = "gcp.example.com."
+  type         = "CNAME"
+  managed_zone = "zone-example"
+  rrdatas      = ["unmanaged-gcp.storage.googleapis.com"]
+}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "providers.tf"), []byte(tfContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prober := &mockLocalProber{
+		isCloud: true,
+		isVuln:  true,
+	}
+
+	res, err := RunLocalEngine(context.Background(), tmpDir, prober)
+	if err != nil {
+		t.Fatalf("local engine failed: %v", err)
+	}
+
+	if res.EvaluatedRecords != 4 {
+		t.Fatalf("expected 4 evaluated records across supported providers, got %d", res.EvaluatedRecords)
+	}
+
+	if len(res.Findings) != 4 {
+		t.Fatalf("expected 4 findings across all supported providers, got %d", len(res.Findings))
+	}
+
+	expectedDomains := map[string]bool{
+		"aws.example.com":   false,
+		"cf.example.com":    false,
+		"azure.example.com": false,
+		"gcp.example.com":   false,
+	}
+
+	for _, f := range res.Findings {
+		if _, ok := expectedDomains[f.FQDN]; ok {
+			expectedDomains[f.FQDN] = true
+		}
+	}
+
+	for dom, found := range expectedDomains {
+		if !found {
+			t.Errorf("expected finding for provider domain %s", dom)
+		}
+	}
+}
+
+func TestRunLocalEngine_PlanJSON(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "guard-plan-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	planJSON := `{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_s3_bucket.orphan_bucket",
+      "type": "aws_s3_bucket",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "bucket": "acme-orphan-bucket"
+        }
+      }
+    },
+    {
+      "address": "aws_route53_record.dangling",
+      "type": "aws_route53_record",
+      "change": {
+        "actions": ["no-op"],
+        "after": {
+          "name": "orphan.acme.com",
+          "type": "CNAME",
+          "records": [
+            "acme-orphan-bucket.s3.amazonaws.com"
+          ]
+        }
+      }
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(tmpDir, "tfplan.json"), []byte(planJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	prober := &mockLocalProber{
+		isCloud: true,
+		isVuln:  true,
+	}
+
+	res, err := RunLocalEngine(context.Background(), tmpDir, prober)
+	if err != nil {
+		t.Fatalf("local engine failed on tfplan.json: %v", err)
+	}
+
+	if !res.UsedPlan {
+		t.Errorf("expected UsedPlan to be true when tfplan.json exists")
+	}
+
+	if res.EvaluatedRecords != 1 {
+		t.Errorf("expected 1 evaluated record from plan, got %d", res.EvaluatedRecords)
+	}
+
+	if len(res.Findings) != 1 {
+		t.Fatalf("expected 1 finding from plan, got %d", len(res.Findings))
+	}
+
+	if res.Findings[0].FQDN != "orphan.acme.com" {
+		t.Errorf("expected finding FQDN orphan.acme.com, got %s", res.Findings[0].FQDN)
+	}
+}
+
+func TestGenerateSnippets_Formatting(t *testing.T) {
+	findings := []correlator.Finding{
+		{
+			RuleID: correlator.RuleDanglingPointer,
+			FQDN:   "snippet.example.com",
+		},
+	}
+
+	snippets := generateSnippets(findings)
+	snippet, ok := snippets["snippet.example.com"]
+	if !ok {
+		t.Fatalf("expected snippet for snippet.example.com")
+	}
+
+	if !strings.HasPrefix(snippet, "# subdomainwatch-ignore: "+correlator.RuleDanglingPointer) {
+		t.Errorf("expected snippet to start with '# subdomainwatch-ignore: %s', got %s", correlator.RuleDanglingPointer, snippet)
+	}
+	if !strings.Contains(snippet, "domain=snippet.example.com") {
+		t.Errorf("expected snippet to contain 'domain=snippet.example.com', got %s", snippet)
+	}
+	if !strings.Contains(snippet, "expires=") {
+		t.Errorf("expected snippet to contain 'expires=', got %s", snippet)
+	}
+	if !strings.Contains(snippet, "approver=@") {
+		t.Errorf("expected snippet to contain 'approver=@', got %s", snippet)
+	}
+	if !strings.Contains(snippet, `reason="Accepted pre-commit risk"`) {
+		t.Errorf("expected snippet to contain reason 'Accepted pre-commit risk', got %s", snippet)
 	}
 }
