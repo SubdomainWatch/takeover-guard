@@ -256,7 +256,7 @@ curl -X POST https://devpages.io/api/submit \
 | `hackernews` | Hacker News (Show HN) | Class C | Staged (Draft Ready) | Pending | `hackernews` | Show HN post staged |
 | `peerlist` | Peerlist | Class C | Staged (Dossier Ready) | Pending | `peerlist` | Project launch dossier ready |
 | `devpost` | Devpost | Class C | Staged (Dossier Ready) | Pending | `devpost` | Software listing dossier ready |
-| `makerlog` | Makerlog | Class C | Staged (Dossier Ready) | Pending | `makerlog` | Product launch dossier ready |
+| `makerlog` | Makerlog | Class C | Web Portal | Instant | Excluded (Dead Service) | 2026-10-12 | - |
 | `indiehackers` | Indie Hackers | Class C | Staged (Dossier Ready) | Pending | `indiehackers` | Product profile dossier ready |
 | `stackshare` | StackShare | Class C | Staged (Dossier Ready) | Pending | `stackshare` | Tool submission dossier ready |
 | `openbase` | Openbase | Class C | Staged (Dossier Ready) | Pending | `openbase` | Package profile dossier ready |
