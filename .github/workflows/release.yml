@@ -3,7 +3,7 @@ name: Release Guard Container
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -37,10 +37,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/takeover-guard
           tags: |
-            type=ref,event=tag
             type=semver,pattern=v{{major}}
             type=semver,pattern=v{{version}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest
 
       - name: Build and Push
         uses: docker/build-push-action@v6
