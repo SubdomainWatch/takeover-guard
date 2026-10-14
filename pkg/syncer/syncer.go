@@ -144,6 +144,13 @@ func SyncTelemetry(ctx context.Context, syncURL, apiKey string, payload *SyncPay
 		syncURL = "https://subdomainwatch.com/api/guard/sync"
 	}
 
+	lowerURL := strings.ToLower(syncURL)
+	if !strings.HasPrefix(lowerURL, "https://") &&
+		!strings.HasPrefix(lowerURL, "http://127.0.0.1") &&
+		!strings.HasPrefix(lowerURL, "http://localhost") {
+		return fmt.Errorf("insecure syncURL: must use HTTPS")
+	}
+
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to serialize telemetry: %w", err)
@@ -156,9 +163,14 @@ func SyncTelemetry(ctx context.Context, syncURL, apiKey string, payload *SyncPay
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("User-Agent", "SubdomainWatch-Guard/2.1.0")
+	req.Header.Set("User-Agent", "SubdomainWatch-Guard/2.2.0")
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		// Non-blocking fail-safe: log note without halting CI check

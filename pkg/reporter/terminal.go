@@ -21,7 +21,7 @@ const (
 
 func PrintBanner(w io.Writer, mode string) {
 	fmt.Fprintf(w, "\n%s╔═══════════════════════════════════════════════════════════════════════╗%s\n", colorCyan, colorReset)
-	fmt.Fprintf(w, "%s║           SUBDOMAINWATCH TAKEOVER GUARD v2.1.0 (HARDENED)             ║%s\n", colorCyan, colorReset)
+	fmt.Fprintf(w, "%s║           SUBDOMAINWATCH TAKEOVER GUARD v2.2.0 (HARDENED)             ║%s\n", colorCyan, colorReset)
 	fmt.Fprintf(w, "%s║  Shift-Left IaC Security Gate & Mandatory Post-Apply Sentinel Engine  ║%s\n", colorDim, colorReset)
 	fmt.Fprintf(w, "%s╚═══════════════════════════════════════════════════════════════════════╝%s\n", colorCyan, colorReset)
 	fmt.Fprintf(w, " %sMode:%s %s\n\n", colorBold, colorReset, mode)

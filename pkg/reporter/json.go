@@ -37,7 +37,7 @@ func GenerateSummaryReport(mode string, totalModified int, findings []correlator
 
 	return &SummaryReport{
 		Timestamp:            time.Now().UTC().Format(time.RFC3339),
-		ToolVersion:          "2.1.0",
+		ToolVersion:          "2.2.0",
 		Mode:                 mode,
 		TotalModifiedRecords: totalModified,
 		CriticalCount:        crit,

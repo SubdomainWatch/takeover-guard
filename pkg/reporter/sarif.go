@@ -168,7 +168,7 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 				Tool: SarifTool{
 					Driver: SarifDriver{
 						Name:           "SubdomainWatch Takeover Guard",
-						Version:        "2.1.0",
+						Version:        "2.2.0",
 						InformationURI: "https://subdomainwatch.com/spec",
 						Rules:          rules,
 					},

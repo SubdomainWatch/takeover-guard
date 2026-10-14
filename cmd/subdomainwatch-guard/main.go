@@ -34,7 +34,8 @@ func main() {
 		syncURL        string
 	)
 
-	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON")
+	flag.StringVar(&planFile, "plan-file", "tfplan.json", "Path to terraform plan JSON")
+	flag.StringVar(&planFile, "plan", "tfplan.json", "Path to terraform plan JSON (alias for -plan-file)")
 	flag.StringVar(&mode, "mode", "pre-merge", "Execution mode: pre-merge, post-apply-sentinel, or pre-commit")
 	flag.StringVar(&failOnSeverity, "fail-on-severity", "CRITICAL", "Minimum severity to fail build: CRITICAL, HIGH, WARNING")
 	flag.StringVar(&failMode, "fail-mode", "closed", "Behavior on failure: closed (fail build) or open (warn only)")
@@ -233,7 +234,7 @@ func main() {
 			CommitSHA:            envInfo.CommitSHA,
 			PRNumber:             envInfo.PRNumber,
 			Mode:                 mode,
-			ToolVersion:          "2.1.0",
+			ToolVersion:          "2.2.0",
 			Timestamp:            time.Now().UTC().Format(time.RFC3339),
 			Status:               status,
 			TotalModifiedRecords: totalModified,

@@ -6,7 +6,7 @@
       "tool": {
         "driver": {
           "name": "SubdomainWatch Takeover Guard",
-          "version": "2.1.0",
+          "version": "2.2.0",
           "informationUri": "https://subdomainwatch.com/spec",
           "rules": [
             {

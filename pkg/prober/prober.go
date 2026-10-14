@@ -29,6 +29,37 @@ type Prober struct {
 	wildcardCache map[string]*WildcardBaseline
 }
 
+func isValidProbeHostname(host string) bool {
+	if len(host) == 0 || len(host) > 255 {
+		return false
+	}
+	if strings.ContainsAny(host, " \t\r\n/\\@?#") {
+		return false
+	}
+	h := host
+	if strings.Contains(host, ":") {
+		if sh, _, err := net.SplitHostPort(host); err == nil {
+			h = sh
+		}
+	}
+	cleanIP := strings.Trim(h, "[]")
+	if ip := net.ParseIP(cleanIP); ip != nil {
+		return true
+	}
+	labels := strings.Split(h, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // isIPBlocked implements the consolidated SSRF blocklist kept in exact parity
 // with web/src/lib/security/net-guard.ts and core/net_guard.py (Phase 4):
 // loopback, RFC 1918 (10/8, 172.16/12, 192.168/16), CGNAT 100.64.0.0/10,
@@ -144,6 +175,14 @@ func NewProber(engine *FingerprintEngine) *Prober {
 			if len(via) >= 3 {
 				return http.ErrUseLastResponse
 			}
+			scheme := strings.ToLower(req.URL.Scheme)
+			if scheme != "http" && scheme != "https" {
+				return http.ErrUseLastResponse
+			}
+			port := req.URL.Port()
+			if port != "" && port != "80" && port != "443" && port != "8080" && port != "8443" {
+				return http.ErrUseLastResponse
+			}
 			return nil
 		},
 	}
@@ -202,9 +241,16 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 	p.httpSem <- struct{}{}
 	defer func() { <-p.httpSem }()
 
-	// Wildcard Subdomain Probing Baseline Check (§6.3)
-	apex := extractApex(normFQDN)
-	baseline := p.getWildcardBaseline(apex)
+	// Wildcard Subdomain Probing Baseline Check (§6.3) - domains only, not IP addresses
+	var baseline *WildcardBaseline
+	hostWithoutPort := normFQDN
+	if h, _, err := net.SplitHostPort(normFQDN); err == nil {
+		hostWithoutPort = h
+	}
+	if net.ParseIP(strings.Trim(hostWithoutPort, "[]")) == nil {
+		apex := extractApex(normFQDN)
+		baseline = p.getWildcardBaseline(apex)
+	}
 
 	// Probe target endpoint using 16KB range request
 	status, bodyStr, bodyHash, headers, err := p.executeSafeProbe(normFQDN)
@@ -264,6 +310,10 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 }
 
 func (p *Prober) executeSafeProbe(host string) (int, string, string, http.Header, error) {
+	if !isValidProbeHostname(host) {
+		return 0, "", "", nil, fmt.Errorf("invalid probe target hostname: %s", host)
+	}
+
 	reqUrl := "http://" + host
 	req, err := http.NewRequest("GET", reqUrl, nil)
 	if err != nil {
@@ -272,7 +322,7 @@ func (p *Prober) executeSafeProbe(host string) (int, string, string, http.Header
 
 	// Hardened safe headers: 16KB Range header to avoid reading massive payloads
 	req.Header.Set("Range", "bytes=0-16383")
-	req.Header.Set("User-Agent", "SubdomainWatch-Takeover-Guard/2.1.0")
+	req.Header.Set("User-Agent", "SubdomainWatch-Takeover-Guard/2.2.0")
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
