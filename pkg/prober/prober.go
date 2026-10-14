@@ -9,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +29,6 @@ type Prober struct {
 	wildcardCache map[string]*WildcardBaseline
 }
 
-var validHostnameRegex = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-_]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9][a-zA-Z0-9-_]{0,61}[a-zA-Z0-9](?::[0-9]{1,5})?$`)
-
 func isValidProbeHostname(host string) bool {
 	if len(host) == 0 || len(host) > 255 {
 		return false
@@ -39,7 +36,28 @@ func isValidProbeHostname(host string) bool {
 	if strings.ContainsAny(host, " \t\r\n/\\@?#") {
 		return false
 	}
-	return validHostnameRegex.MatchString(host)
+	h := host
+	if strings.Contains(host, ":") {
+		if sh, _, err := net.SplitHostPort(host); err == nil {
+			h = sh
+		}
+	}
+	cleanIP := strings.Trim(h, "[]")
+	if ip := net.ParseIP(cleanIP); ip != nil {
+		return true
+	}
+	labels := strings.Split(h, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isIPBlocked implements the consolidated SSRF blocklist kept in exact parity
@@ -223,9 +241,16 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 	p.httpSem <- struct{}{}
 	defer func() { <-p.httpSem }()
 
-	// Wildcard Subdomain Probing Baseline Check (§6.3)
-	apex := extractApex(normFQDN)
-	baseline := p.getWildcardBaseline(apex)
+	// Wildcard Subdomain Probing Baseline Check (§6.3) - domains only, not IP addresses
+	var baseline *WildcardBaseline
+	hostWithoutPort := normFQDN
+	if h, _, err := net.SplitHostPort(normFQDN); err == nil {
+		hostWithoutPort = h
+	}
+	if net.ParseIP(strings.Trim(hostWithoutPort, "[]")) == nil {
+		apex := extractApex(normFQDN)
+		baseline = p.getWildcardBaseline(apex)
+	}
 
 	// Probe target endpoint using 16KB range request
 	status, bodyStr, bodyHash, headers, err := p.executeSafeProbe(normFQDN)
