@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,18 @@ type Prober struct {
 
 	wildcardLock  sync.RWMutex
 	wildcardCache map[string]*WildcardBaseline
+}
+
+var validHostnameRegex = regexp.MustCompile(`^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-_]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9][a-zA-Z0-9-_]{0,61}[a-zA-Z0-9](?::[0-9]{1,5})?$`)
+
+func isValidProbeHostname(host string) bool {
+	if len(host) == 0 || len(host) > 255 {
+		return false
+	}
+	if strings.ContainsAny(host, " \t\r\n/\\@?#") {
+		return false
+	}
+	return validHostnameRegex.MatchString(host)
 }
 
 // isIPBlocked implements the consolidated SSRF blocklist kept in exact parity
@@ -142,6 +155,14 @@ func NewProber(engine *FingerprintEngine) *Prober {
 		Timeout:   3 * time.Second, // 3-second HTTP client timeout (§7)
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
+				return http.ErrUseLastResponse
+			}
+			scheme := strings.ToLower(req.URL.Scheme)
+			if scheme != "http" && scheme != "https" {
+				return http.ErrUseLastResponse
+			}
+			port := req.URL.Port()
+			if port != "" && port != "80" && port != "443" && port != "8080" && port != "8443" {
 				return http.ErrUseLastResponse
 			}
 			return nil
@@ -264,6 +285,10 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 }
 
 func (p *Prober) executeSafeProbe(host string) (int, string, string, http.Header, error) {
+	if !isValidProbeHostname(host) {
+		return 0, "", "", nil, fmt.Errorf("invalid probe target hostname: %s", host)
+	}
+
 	reqUrl := "http://" + host
 	req, err := http.NewRequest("GET", reqUrl, nil)
 	if err != nil {

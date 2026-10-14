@@ -66,25 +66,7 @@ func RunLocalEngine(ctx context.Context, dir string, prober correlator.ProberInt
 		}
 	}
 
-	// Try speculative local plan if terraform binary is present
-	if tfBinary, err := exec.LookPath("terraform"); err == nil {
-		speculativePlan, err := generateSpeculativePlan(ctx, tfBinary, dir)
-		if err == nil && len(speculativePlan) > 0 {
-			findings, count, err := correlator.EvaluatePlanBytes(speculativePlan, prober)
-			if err == nil {
-				return &LocalScanResult{
-					EvaluatedRecords: count,
-					Findings:         findings,
-					UsedPlan:         true,
-					OverrideSnippets: generateSnippets(findings),
-				}, nil
-			}
-		} else if err != nil {
-			fmt.Printf("ℹ Speculative plan skipped or failed (%v), falling back to static HCL scan\n", err)
-		}
-	}
-
-	// Fallback: Static HCL parser across all .tf files in directory
+	// Fallback: Static HCL parser across all .tf files in directory (safe: zero execution of external binaries)
 	return scanHCLFiles(dir, prober)
 }
 
@@ -323,21 +305,6 @@ func parseTFFile(path string) ([]LocalRecord, map[string]bool, error) {
 	}
 
 	return records, buckets, scanner.Err()
-}
-
-func generateSpeculativePlan(ctx context.Context, tfBinary, dir string) ([]byte, error) {
-	planOut := filepath.Join(dir, ".guard-speculative.tfplan")
-	defer os.Remove(planOut)
-
-	cmdPlan := exec.CommandContext(ctx, tfBinary, "plan", "-refresh=false", "-out="+planOut)
-	cmdPlan.Dir = dir
-	if err := cmdPlan.Run(); err != nil {
-		return nil, err
-	}
-
-	cmdShow := exec.CommandContext(ctx, tfBinary, "show", "-json", planOut)
-	cmdShow.Dir = dir
-	return cmdShow.Output()
 }
 
 func generateSnippets(findings []correlator.Finding) map[string]string {
