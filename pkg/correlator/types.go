@@ -50,8 +50,39 @@ type Finding struct {
 	Reason     string `json:"reason"`
 }
 
+// ProbeStatus represents the outcome of a live claimability probe
+type ProbeStatus string
+
+const (
+	ProbeStatusClean         ProbeStatus = "CLEAN"
+	ProbeStatusConfirmed     ProbeStatus = "CONFIRMED"
+	ProbeStatusIndeterminate ProbeStatus = "INDETERMINATE"
+)
+
+// IndeterminateTarget represents a target that could not be verified due to DNS or transport timeouts
+type IndeterminateTarget struct {
+	FQDN    string `json:"fqdn"`
+	Target  string `json:"target"`
+	Address string `json:"address,omitempty"`
+	Reason  string `json:"reason"`
+}
+
+// EvaluationResult contains the full analysis of a Terraform plan
+type EvaluationResult struct {
+	Findings             []Finding             `json:"findings"`
+	IndeterminateTargets []IndeterminateTarget `json:"indeterminate_targets,omitempty"`
+	TotalModifiedRecords int                   `json:"total_modified_records"`
+}
+
 // ProberInterface abstracts claimability checks for decoupling and unit testing
 type ProberInterface interface {
 	IsCloudProviderTarget(target string) bool
 	ProbeClaimability(fqdn, target string) (isVulnerable bool, severity string, remediation string)
 }
+
+// DetailedProber extends ProberInterface to return precise ProbeStatus (clean, confirmed, indeterminate)
+type DetailedProber interface {
+	ProberInterface
+	ProbeClaimabilityDetailed(fqdn, target string) (status ProbeStatus, severity string, remediation string, errReason string)
+}
+

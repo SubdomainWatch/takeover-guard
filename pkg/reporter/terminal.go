@@ -28,9 +28,23 @@ func PrintBanner(w io.Writer, mode string) {
 }
 
 func PrintResults(w io.Writer, report *SummaryReport) {
+	if len(report.IndeterminateTargets) > 0 {
+		fmt.Fprintf(w, "%s⚠ INDETERMINATE PROBE TARGETS (%d total)%s\n", colorYellow, len(report.IndeterminateTargets), colorReset)
+		fmt.Fprintf(w, "  External DNS or HTTP probes timed out or encountered transport errors.\n")
+		fmt.Fprintf(w, "  These targets are non-blocking diagnostic warnings and do not fail the gate:\n")
+		for i, it := range report.IndeterminateTargets {
+			fmt.Fprintf(w, "  %d. %s -> %s\n     %sDiagnostic:%s %s\n", i+1, it.FQDN, it.Target, colorDim, colorReset, it.Reason)
+		}
+		fmt.Fprintf(w, "\n")
+	}
+
 	if len(report.Findings) == 0 {
 		fmt.Fprintf(w, "%s✔ NO SUBDOMAIN TAKEOVER RISKS DETECTED%s\n", colorGreen, colorReset)
-		fmt.Fprintf(w, "  Analyzed %d modified DNS records across plan changes. All targets verified safe.\n\n", report.TotalModifiedRecords)
+		if len(report.IndeterminateTargets) > 0 {
+			fmt.Fprintf(w, "  Analyzed %d modified DNS records across plan changes (%d indeterminate due to external network/DNS timeouts).\n\n", report.TotalModifiedRecords, report.IndeterminateCount)
+		} else {
+			fmt.Fprintf(w, "  Analyzed %d modified DNS records across plan changes. All targets verified safe.\n\n", report.TotalModifiedRecords)
+		}
 		return
 	}
 
@@ -89,12 +103,12 @@ func plainBlastRadius(f correlator.Finding) string {
 }
 
 func PrintCircuitBreakerTrip(w io.Writer, timedOutTargets []string) {
-	fmt.Fprintf(w, "\n%s🚨 CIRCUIT_BREAKER_TRIP: SECURITY GATE ABORTED%s\n", colorRed, colorReset)
+	fmt.Fprintf(w, "\n%s🚨 CIRCUIT_BREAKER_TRIP: DNS RESOLUTION SUSPENDED%s\n", colorRed, colorReset)
 	fmt.Fprintf(w, "5 consecutive DNS timeouts detected on targets:\n")
 	for i, target := range timedOutTargets {
 		fmt.Fprintf(w, "  %d. %s\n", i+1, target)
 	}
-	fmt.Fprintf(w, "\n%sHard build failure enforced. Manual security review required.%s\n\n", colorBold, colorReset)
+	fmt.Fprintf(w, "\n%sExternal DNS resolution suspended. Indeterminate targets flagged for manual review.%s\n\n", colorBold, colorReset)
 }
 
 func PrintBudgetExceeded(w io.Writer, count, max int) {

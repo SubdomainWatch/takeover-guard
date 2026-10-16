@@ -9,17 +9,19 @@ import (
 )
 
 type SummaryReport struct {
-	Timestamp            string               `json:"timestamp"`
-	ToolVersion          string               `json:"tool_version"`
-	Mode                 string               `json:"mode"`
-	TotalModifiedRecords int                  `json:"total_modified_records"`
-	CriticalCount        int                  `json:"critical_count"`
-	HighCount            int                  `json:"high_count"`
-	WarningCount         int                  `json:"warning_count"`
-	Findings             []correlator.Finding `json:"findings"`
+	Timestamp            string                           `json:"timestamp"`
+	ToolVersion          string                           `json:"tool_version"`
+	Mode                 string                           `json:"mode"`
+	TotalModifiedRecords int                              `json:"total_modified_records"`
+	CriticalCount        int                              `json:"critical_count"`
+	HighCount            int                              `json:"high_count"`
+	WarningCount         int                              `json:"warning_count"`
+	IndeterminateCount   int                              `json:"indeterminate_count"`
+	Findings             []correlator.Finding             `json:"findings"`
+	IndeterminateTargets []correlator.IndeterminateTarget `json:"indeterminate_targets,omitempty"`
 }
 
-func GenerateSummaryReport(mode string, totalModified int, findings []correlator.Finding) *SummaryReport {
+func GenerateSummaryReport(mode string, totalModified int, findings []correlator.Finding, indeterminate []correlator.IndeterminateTarget) *SummaryReport {
 	crit := 0
 	high := 0
 	warn := 0
@@ -43,7 +45,9 @@ func GenerateSummaryReport(mode string, totalModified int, findings []correlator
 		CriticalCount:        crit,
 		HighCount:            high,
 		WarningCount:         warn,
+		IndeterminateCount:   len(indeterminate),
 		Findings:             findings,
+		IndeterminateTargets: indeterminate,
 	}
 }
 

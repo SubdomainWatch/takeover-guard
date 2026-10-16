@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/subdomainwatch/takeover-guard/pkg/correlator"
+	"github.com/subdomainwatch/takeover-guard/pkg/dnsresolver"
 )
 
 type WildcardBaseline struct {
@@ -24,6 +27,7 @@ type Prober struct {
 	engine     *FingerprintEngine
 	httpClient *http.Client
 	httpSem    chan struct{} // Governs 10 concurrent HTTP clients (§7)
+	resolver   *dnsresolver.DNSResolver
 
 	wildcardLock  sync.RWMutex
 	wildcardCache map[string]*WildcardBaseline
@@ -125,15 +129,21 @@ func isIPBlocked(ip net.IP) bool {
 	return false
 }
 
-func NewProber(engine *FingerprintEngine) *Prober {
+func NewProberWithResolver(engine *FingerprintEngine, resolver *dnsresolver.DNSResolver) *Prober {
 	dialer := &net.Dialer{
 		Timeout:   2 * time.Second,
 		KeepAlive: 15 * time.Second,
 	}
 
 	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: nil, // Hardened SSRF defense: do NOT use environment proxy which could bypass IP validation
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if resolver != nil {
+				if tripped, targets := resolver.IsCircuitBreakerTripped(); tripped {
+					return nil, fmt.Errorf("CIRCUIT_BREAKER_TRIP: DNS circuit breaker tripped on %v", targets)
+				}
+			}
+
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
@@ -141,6 +151,9 @@ func NewProber(engine *FingerprintEngine) *Prober {
 
 			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 			if err != nil {
+				if resolver != nil {
+					resolver.RecordTimeout(host)
+				}
 				return nil, err
 			}
 
@@ -160,7 +173,17 @@ func NewProber(engine *FingerprintEngine) *Prober {
 
 			// Pin connection to the first validated safe IP to prevent DNS rebinding TOCTOU
 			pinnedAddr := net.JoinHostPort(safeIP.String(), port)
-			return dialer.DialContext(ctx, network, pinnedAddr)
+			conn, err := dialer.DialContext(ctx, network, pinnedAddr)
+			if err != nil {
+				if resolver != nil {
+					resolver.RecordTimeout(host)
+				}
+				return nil, err
+			}
+			if resolver != nil {
+				resolver.RecordSuccess()
+			}
+			return conn, nil
 		},
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
@@ -191,8 +214,13 @@ func NewProber(engine *FingerprintEngine) *Prober {
 		engine:        engine,
 		httpClient:    client,
 		httpSem:       make(chan struct{}, 10), // Max 10 concurrent HTTP clients (§7)
+		resolver:      resolver,
 		wildcardCache: make(map[string]*WildcardBaseline),
 	}
+}
+
+func NewProber(engine *FingerprintEngine) *Prober {
+	return NewProberWithResolver(engine, nil)
 }
 
 // SetCustomTransport allows test harnesses or mocks to override the transport
@@ -217,24 +245,34 @@ func (p *Prober) IsCloudProviderTarget(target string) bool {
 	return false
 }
 
-// ProbeClaimability executes live multi-vector fingerprint probing (§5) with SSRF guard and wildcard suppression (§6.3)
-func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
+// ProbeClaimabilityDetailed executes live multi-vector fingerprint probing with SSRF guard and wildcard suppression,
+// returning ProbeStatus (Clean, Confirmed, or Indeterminate).
+func (p *Prober) ProbeClaimabilityDetailed(fqdn, target string) (correlator.ProbeStatus, string, string, string) {
 	normTarget := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target)), ".")
 	normFQDN := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(fqdn)), ".")
 
 	// Find matching signatures
 	var matchingSigs []Fingerprint
-	for _, sig := range p.engine.Bundle.Signatures {
-		for _, re := range sig.compiledPatterns {
-			if re != nil && re.MatchString(normTarget) {
-				matchingSigs = append(matchingSigs, sig)
-				break
+	if p.engine != nil && p.engine.Bundle != nil {
+		for _, sig := range p.engine.Bundle.Signatures {
+			for _, re := range sig.compiledPatterns {
+				if re != nil && re.MatchString(normTarget) {
+					matchingSigs = append(matchingSigs, sig)
+					break
+				}
 			}
 		}
 	}
 
 	if len(matchingSigs) == 0 {
-		return false, "", ""
+		return correlator.ProbeStatusClean, "", "", ""
+	}
+
+	// Check circuit breaker before probing
+	if p.resolver != nil {
+		if tripped, targets := p.resolver.IsCircuitBreakerTripped(); tripped {
+			return correlator.ProbeStatusIndeterminate, "", "", fmt.Sprintf("DNS circuit breaker tripped: 5 consecutive timeouts on %v", targets)
+		}
 	}
 
 	// Acquire HTTP semaphore before any network call, including the wildcard baseline.
@@ -255,16 +293,26 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 	// Probe target endpoint using 16KB range request
 	status, bodyStr, bodyHash, headers, err := p.executeSafeProbe(normFQDN)
 	if err != nil {
+		// If blocked by SSRF, target is private/internal IP -> suppress alert
+		if strings.Contains(err.Error(), "SSRF guard") {
+			return correlator.ProbeStatusClean, "", "", ""
+		}
+
 		// Try target directly as fallback if fqdn not resolving
-		status, bodyStr, bodyHash, headers, err = p.executeSafeProbe(normTarget)
-		if err != nil {
-			return false, "", ""
+		var err2 error
+		status, bodyStr, bodyHash, headers, err2 = p.executeSafeProbe(normTarget)
+		if err2 != nil {
+			if strings.Contains(err2.Error(), "SSRF guard") {
+				return correlator.ProbeStatusClean, "", "", ""
+			}
+			// Both FQDN and target failed due to network/DNS timeout or transport error -> Indeterminate
+			return correlator.ProbeStatusIndeterminate, "", "", fmt.Sprintf("transport/DNS error on %s (%v) and %s (%v)", normFQDN, err, normTarget, err2)
 		}
 	}
 
 	// Wildcard suppression: if response matches the wildcard baseline profile, suppress alert
 	if baseline != nil && baseline.StatusCode == status && baseline.BodyHash == bodyHash {
-		return false, "", ""
+		return correlator.ProbeStatusClean, "", "", ""
 	}
 
 	// Multi-vector matching: status code + body tokens + headers
@@ -301,12 +349,18 @@ func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
 			}
 
 			if headersMatch {
-				return true, sig.Severity, sig.RemediationGuide
+				return correlator.ProbeStatusConfirmed, sig.Severity, sig.RemediationGuide, ""
 			}
 		}
 	}
 
-	return false, "", ""
+	return correlator.ProbeStatusClean, "", "", ""
+}
+
+// ProbeClaimability executes live multi-vector fingerprint probing (§5) with SSRF guard and wildcard suppression (§6.3)
+func (p *Prober) ProbeClaimability(fqdn, target string) (bool, string, string) {
+	status, sev, rem, _ := p.ProbeClaimabilityDetailed(fqdn, target)
+	return status == correlator.ProbeStatusConfirmed, sev, rem
 }
 
 func (p *Prober) executeSafeProbe(host string) (int, string, string, http.Header, error) {

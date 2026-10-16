@@ -60,10 +60,11 @@ type LocalScanOptions struct {
 
 // LocalScanResult holds the output of the local scanning engine.
 type LocalScanResult struct {
-	EvaluatedRecords int
-	Findings         []correlator.Finding
-	OverrideSnippets map[string]string // domain -> suggested comment
-	UsedPlan         bool
+	EvaluatedRecords     int
+	Findings             []correlator.Finding
+	IndeterminateTargets []correlator.IndeterminateTarget
+	OverrideSnippets     map[string]string // domain -> suggested comment
+	UsedPlan             bool
 }
 
 // RunLocalEngine performs a side-effect-free static audit of local HCL files
@@ -177,10 +178,12 @@ func RunLocalEngine(ctx context.Context, opts LocalScanOptions) (*LocalScanResul
 		}
 	}
 
-	findings, evaluatedCount, err := correlator.EvaluatePlan(&plan, opts.Prober)
+	evalRes, err := correlator.AnalyzePlan(&plan, opts.Prober)
 	if err != nil {
 		return nil, fmt.Errorf("evaluating plan: %w", err)
 	}
+	findings := evalRes.Findings
+	evaluatedCount := evalRes.TotalModifiedRecords
 
 	candByAddress := make(map[string]CandidateRecord)
 	candByFQDN := make(map[string]CandidateRecord)
@@ -230,10 +233,11 @@ func RunLocalEngine(ctx context.Context, opts LocalScanOptions) (*LocalScanResul
 	}
 
 	return &LocalScanResult{
-		EvaluatedRecords: evaluatedCount,
-		Findings:         activeFindings,
-		OverrideSnippets: generateSnippets(activeFindings),
-		UsedPlan:         usedPlan,
+		EvaluatedRecords:     evaluatedCount,
+		Findings:             activeFindings,
+		IndeterminateTargets: evalRes.IndeterminateTargets,
+		OverrideSnippets:     generateSnippets(activeFindings),
+		UsedPlan:             usedPlan,
 	}, nil
 }
 

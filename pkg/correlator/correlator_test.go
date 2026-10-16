@@ -234,3 +234,122 @@ func TestCloudflareRecordExtraction(t *testing.T) {
 		t.Errorf("expected target acme-api.herokudns.com, got %s", findings[0].Target)
 	}
 }
+
+type mockDetailedProber struct {
+	responses map[string]struct {
+		status   ProbeStatus
+		sev      string
+		rem      string
+		errCause string
+	}
+}
+
+func (m *mockDetailedProber) IsCloudProviderTarget(target string) bool {
+	return true
+}
+
+func (m *mockDetailedProber) ProbeClaimability(fqdn, target string) (bool, string, string) {
+	resp := m.responses[fqdn]
+	return resp.status == ProbeStatusConfirmed, resp.sev, resp.rem
+}
+
+func (m *mockDetailedProber) ProbeClaimabilityDetailed(fqdn, target string) (ProbeStatus, string, string, string) {
+	resp := m.responses[fqdn]
+	return resp.status, resp.sev, resp.rem, resp.errCause
+}
+
+func TestAnalyzePlanIndeterminateAndClean(t *testing.T) {
+	mockP := &mockDetailedProber{
+		responses: map[string]struct {
+			status   ProbeStatus
+			sev      string
+			rem      string
+			errCause string
+		}{
+			"status.acme.com": {
+				status:   ProbeStatusIndeterminate,
+				errCause: "dial tcp: i/o timeout probing upstream",
+			},
+			"clean.acme.com": {
+				status: ProbeStatusClean,
+			},
+			"vuln.acme.com": {
+				status:   ProbeStatusConfirmed,
+				sev:      SeverityCritical,
+				rem:      "Reclaim S3 bucket",
+				errCause: "",
+			},
+		},
+	}
+
+	plan := &PlanJSON{
+		ResourceChanges: []ResourceChange{
+			{
+				Address: "cloudflare_record.status",
+				Type:    "cloudflare_record",
+				Change: ChangeObj{
+					Actions: []string{"create"},
+					After: map[string]any{
+						"name":    "status.acme.com",
+						"type":    "CNAME",
+						"content": "acme-status.herokuapp.com",
+					},
+				},
+			},
+			{
+				Address: "cloudflare_record.clean",
+				Type:    "cloudflare_record",
+				Change: ChangeObj{
+					Actions: []string{"create"},
+					After: map[string]any{
+						"name":    "clean.acme.com",
+						"type":    "CNAME",
+						"content": "acme-clean.herokuapp.com",
+					},
+				},
+			},
+			{
+				Address: "cloudflare_record.vuln",
+				Type:    "cloudflare_record",
+				Change: ChangeObj{
+					Actions: []string{"create"},
+					After: map[string]any{
+						"name":    "vuln.acme.com",
+						"type":    "CNAME",
+						"content": "acme-vuln.s3.amazonaws.com",
+					},
+				},
+			},
+		},
+	}
+
+	evalRes, err := AnalyzePlan(plan, mockP)
+	if err != nil {
+		t.Fatalf("unexpected AnalyzePlan error: %v", err)
+	}
+
+	if evalRes.TotalModifiedRecords != 3 {
+		t.Errorf("expected 3 modified records, got %d", evalRes.TotalModifiedRecords)
+	}
+
+	// 1 confirmed finding only
+	if len(evalRes.Findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(evalRes.Findings))
+	}
+	if evalRes.Findings[0].FQDN != "vuln.acme.com" {
+		t.Errorf("expected finding for vuln.acme.com, got %s", evalRes.Findings[0].FQDN)
+	}
+
+	// 1 indeterminate target
+	if len(evalRes.IndeterminateTargets) != 1 {
+		t.Fatalf("expected 1 indeterminate target, got %d", len(evalRes.IndeterminateTargets))
+	}
+	indet := evalRes.IndeterminateTargets[0]
+	if indet.FQDN != "status.acme.com" {
+		t.Errorf("expected indeterminate FQDN status.acme.com, got %s", indet.FQDN)
+	}
+	if indet.Target != "acme-status.herokuapp.com" {
+		t.Errorf("expected indeterminate target acme-status.herokuapp.com, got %s", indet.Target)
+	}
+}
+

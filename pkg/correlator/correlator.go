@@ -106,21 +106,40 @@ func IsPrivateTarget(target string) bool {
 
 // EvaluatePlanBytes parses raw Terraform plan JSON and runs the correlation evaluation
 func EvaluatePlanBytes(planBytes []byte, prober ProberInterface) ([]Finding, int, error) {
+	res, err := AnalyzePlanBytes(planBytes, prober)
+	if err != nil {
+		return nil, 0, err
+	}
+	return res.Findings, res.TotalModifiedRecords, nil
+}
+
+// AnalyzePlanBytes parses raw Terraform plan JSON and returns detailed evaluation results
+func AnalyzePlanBytes(planBytes []byte, prober ProberInterface) (*EvaluationResult, error) {
 	var plan PlanJSON
 	if err := json.Unmarshal(planBytes, &plan); err != nil {
-		return nil, 0, fmt.Errorf("failed to parse terraform plan JSON: %w", err)
+		return nil, fmt.Errorf("failed to parse terraform plan JSON: %w", err)
 	}
 
-	return EvaluatePlan(&plan, prober)
+	return AnalyzePlan(&plan, prober)
 }
 
 // EvaluatePlan evaluates parsed Terraform plan against takeover rules
 func EvaluatePlan(plan *PlanJSON, prober ProberInterface) ([]Finding, int, error) {
+	res, err := AnalyzePlan(plan, prober)
+	if err != nil {
+		return nil, 0, err
+	}
+	return res.Findings, res.TotalModifiedRecords, nil
+}
+
+// AnalyzePlan evaluates parsed Terraform plan against takeover rules and collects indeterminate probe targets
+func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, error) {
 	deletedCloudResources := make(map[string]map[string]struct{})
 	activeCloudResources := make(map[string]map[string]struct{})
 	deletedDnsRecords := make(map[string]string)
 	activeDnsRecords := make(map[string]DnsRecordEntry)
 	var findings []Finding
+	var indeterminateTargets []IndeterminateTarget
 
 	totalModifiedDnsRecords := 0
 
@@ -398,8 +417,23 @@ func EvaluatePlan(plan *PlanJSON, prober ProberInterface) ([]Finding, int, error
 				continue
 			}
 
-			isVuln, sev, rem := prober.ProbeClaimability(fqdn, target)
-			if isVuln {
+			var status ProbeStatus
+			var sev, rem, errReason string
+
+			if dp, ok := prober.(DetailedProber); ok {
+				status, sev, rem, errReason = dp.ProbeClaimabilityDetailed(fqdn, target)
+			} else {
+				isVuln, s, r := prober.ProbeClaimability(fqdn, target)
+				if isVuln {
+					status = ProbeStatusConfirmed
+					sev, rem = s, r
+				} else {
+					status = ProbeStatusClean
+				}
+			}
+
+			switch status {
+			case ProbeStatusConfirmed:
 				findings = append(findings, Finding{
 					RuleID:   RuleDanglingPointer,
 					Severity: sev,
@@ -408,11 +442,28 @@ func EvaluatePlan(plan *PlanJSON, prober ProberInterface) ([]Finding, int, error
 					Address:  entry.Address,
 					Reason:   rem,
 				})
+			case ProbeStatusIndeterminate:
+				reason := fmt.Sprintf("External probe indeterminate for %s -> %s", fqdn, target)
+				if errReason != "" {
+					reason = fmt.Sprintf("External probe indeterminate for %s -> %s: %s", fqdn, target, errReason)
+				}
+				indeterminateTargets = append(indeterminateTargets, IndeterminateTarget{
+					FQDN:    fqdn,
+					Target:  target,
+					Address: entry.Address,
+					Reason:  reason,
+				})
+			case ProbeStatusClean:
+				// Target verified clean
 			}
 		}
 	}
 
-	return findings, totalModifiedDnsRecords, nil
+	return &EvaluationResult{
+		Findings:             findings,
+		IndeterminateTargets: indeterminateTargets,
+		TotalModifiedRecords: totalModifiedDnsRecords,
+	}, nil
 }
 
 // Helpers

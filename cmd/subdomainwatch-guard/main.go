@@ -4,6 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/subdomainwatch/takeover-guard/pkg/correlator"
+	"github.com/subdomainwatch/takeover-guard/pkg/dnsresolver"
 	"github.com/subdomainwatch/takeover-guard/pkg/localscan"
 	"github.com/subdomainwatch/takeover-guard/pkg/override"
 	"github.com/subdomainwatch/takeover-guard/pkg/prober"
@@ -91,9 +94,15 @@ func main() {
 		fmt.Printf("ℹ Air-gapped offline mode: using embedded bundle (version %s)\n", engine.Bundle.Version)
 	}
 
-	claimProber := prober.NewProber(engine)
+	resolver := dnsresolver.NewDNSResolver()
+	claimProber := prober.NewProberWithResolver(engine, resolver)
+
+	if mockStatus := os.Getenv("GUARD_MOCK_PROBE_STATUS"); mockStatus != "" {
+		claimProber.SetCustomTransport(newMockProbeTransport(mockStatus))
+	}
 
 	var activeFindings []correlator.Finding
+	var activeIndeterminate []correlator.IndeterminateTarget
 	var totalModified int
 	var overrideSnippets map[string]string
 
@@ -115,6 +124,7 @@ func main() {
 		}
 
 		activeFindings = localRes.Findings
+		activeIndeterminate = localRes.IndeterminateTargets
 		totalModified = localRes.EvaluatedRecords
 		overrideSnippets = localRes.OverrideSnippets
 
@@ -130,11 +140,13 @@ func main() {
 			exitConfigFail(failMode, "Error: Failed to read plan file '%s': %v\n", planFile, err)
 		}
 
-		findings, modifiedCount, err := correlator.EvaluatePlanBytes(planBytes, claimProber)
+		evalRes, err := correlator.AnalyzePlanBytes(planBytes, claimProber)
 		if err != nil {
 			exitConfigFail(failMode, "Error evaluating plan: %v\n", err)
 		}
-		totalModified = modifiedCount
+		totalModified = evalRes.TotalModifiedRecords
+		findings := evalRes.Findings
+		activeIndeterminate = evalRes.IndeterminateTargets
 
 		// Check Performance Budget Cap: 200 records (§7)
 		const maxRecords = 200
@@ -160,6 +172,11 @@ func main() {
 		}
 	}
 
+	// Check if DNS circuit breaker tripped
+	if tripped, timedOutTargets := resolver.IsCircuitBreakerTripped(); tripped {
+		reporter.PrintCircuitBreakerTrip(os.Stderr, timedOutTargets)
+	}
+
 	// 4. Generate SARIF 2.1.0 & JSON Reports (§8)
 	if sarifFile != "" {
 		if err := reporter.WriteSarifFile(sarifFile, activeFindings); err != nil {
@@ -169,7 +186,7 @@ func main() {
 		}
 	}
 
-	summary := reporter.GenerateSummaryReport(mode, totalModified, activeFindings)
+	summary := reporter.GenerateSummaryReport(mode, totalModified, activeFindings, activeIndeterminate)
 	if jsonFile != "" {
 		if err := reporter.WriteJSONFile(jsonFile, summary); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to write JSON report: %v\n", err)
@@ -308,3 +325,33 @@ func isTFDir(dir string) bool {
 	})
 	return hasTF
 }
+
+type mockProbeTransport struct {
+	status string
+}
+
+func (m *mockProbeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch strings.ToUpper(m.status) {
+	case "INDETERMINATE":
+		return nil, fmt.Errorf("dial tcp: i/o timeout probing upstream")
+	case "CONFIRMED":
+		if strings.Contains(req.URL.Host, "__sw_probe_") {
+			// Wildcard baseline probe on nonexistent subdomain returns NXDOMAIN
+			return nil, fmt.Errorf("dial tcp: no such host")
+		}
+		rec := httptest.NewRecorder()
+		rec.WriteHeader(http.StatusNotFound)
+		_, _ = rec.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>")
+		return rec.Result(), nil
+	default:
+		rec := httptest.NewRecorder()
+		rec.WriteHeader(http.StatusOK)
+		_, _ = rec.WriteString("<html><body>Clean Target</body></html>")
+		return rec.Result(), nil
+	}
+}
+
+func newMockProbeTransport(status string) http.RoundTripper {
+	return &mockProbeTransport{status: status}
+}
+

@@ -113,6 +113,14 @@ func (r *DNSResolver) ResolveCNAME(domain string) ([]string, error) {
 }
 
 // Circuit breaker tracking (§7 & §3.3)
+func (r *DNSResolver) RecordTimeout(target string) {
+	r.recordTimeout(target)
+}
+
+func (r *DNSResolver) RecordSuccess() {
+	r.recordSuccess()
+}
+
 func (r *DNSResolver) recordTimeout(target string) {
 	r.cbLock.Lock()
 	defer r.cbLock.Unlock()
@@ -138,3 +146,4 @@ func (r *DNSResolver) IsCircuitBreakerTripped() (bool, []string) {
 	defer r.cbLock.Unlock()
 	return r.isTripped, r.timedOutTargets
 }
+

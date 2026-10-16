@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestLoadOfflineSignatures(t *testing.T) {
@@ -100,4 +101,97 @@ func TestProbeClaimabilityMatch(t *testing.T) {
 	if rem == "" {
 		t.Errorf("expected non-empty remediation guide")
 	}
+
+	// Also verify ProbeClaimabilityDetailed directly
+	status, detailedSev, _, _ := prober.ProbeClaimabilityDetailed(ts.Listener.Addr().String(), "acme-test.s3.amazonaws.com")
+	if status != "CONFIRMED" {
+		t.Errorf("expected status CONFIRMED, got %s", status)
+	}
+	if detailedSev != "CRITICAL" {
+		t.Errorf("expected CRITICAL severity, got %s", detailedSev)
+	}
 }
+
+func TestProbeClaimabilityClean(t *testing.T) {
+	engine, err := NewFingerprintEngine()
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	// Active valid site, status 200, no takeover fingerprint tokens
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "<html><body>Welcome to Acme Corp Official Production Portal</body></html>")
+	}))
+	defer ts.Close()
+
+	prober := NewProber(engine)
+	prober.SetCustomTransport(ts.Client().Transport)
+
+	status, _, _, errReason := prober.ProbeClaimabilityDetailed(ts.Listener.Addr().String(), "acme-test.s3.amazonaws.com")
+	if status != "CLEAN" {
+		t.Errorf("expected status CLEAN for active production site, got %s (err: %s)", status, errReason)
+	}
+}
+
+type mockFailingTransport struct {
+	err error
+}
+
+func (m *mockFailingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, m.err
+}
+
+func TestProbeClaimabilityIndeterminateOnTimeout(t *testing.T) {
+	engine, err := NewFingerprintEngine()
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	prober := NewProber(engine)
+	// Inject a transport that simulates a connection timeout / i/o timeout
+	prober.SetCustomTransport(&mockFailingTransport{
+		err: fmt.Errorf("dial tcp 192.0.2.1:80: i/o timeout"),
+	})
+
+	status, _, _, errReason := prober.ProbeClaimabilityDetailed("timeout.example.com", "app.herokuapp.com")
+	if status != "INDETERMINATE" {
+		t.Errorf("expected status INDETERMINATE on transport timeout, got %s", status)
+	}
+	if errReason == "" {
+		t.Errorf("expected non-empty diagnostic error reason for indeterminate probe")
+	}
+
+	// Legacy ProbeClaimability must report false (not confirmed vulnerable)
+	isVuln, _, _ := prober.ProbeClaimability("timeout.example.com", "app.herokuapp.com")
+	if isVuln {
+		t.Errorf("expected isVuln = false for indeterminate probe, got true")
+	}
+}
+
+func TestProberProxyIsNil(t *testing.T) {
+	engine, err := NewFingerprintEngine()
+	if err != nil {
+		t.Fatalf("failed to create engine: %v", err)
+	}
+
+	p := NewProber(engine)
+	transport, ok := p.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", p.httpClient.Transport)
+	}
+
+	// Verify Proxy is strictly nil to prevent proxy environment variables from bypassing IP pinning SSRF checks
+	if transport.Proxy != nil {
+		t.Errorf("expected transport.Proxy to be nil, but got non-nil function")
+	}
+
+	// Verify timeouts: 3s client timeout, 2s dial / TLS timeouts
+	if p.httpClient.Timeout != 3*time.Second {
+		t.Errorf("expected httpClient.Timeout = 3s, got %v", p.httpClient.Timeout)
+	}
+	if transport.TLSHandshakeTimeout != 2*time.Second {
+		t.Errorf("expected TLSHandshakeTimeout = 2s, got %v", transport.TLSHandshakeTimeout)
+	}
+}
+
