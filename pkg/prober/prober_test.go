@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -192,6 +193,39 @@ func TestProberProxyIsNil(t *testing.T) {
 	}
 	if transport.TLSHandshakeTimeout != 2*time.Second {
 		t.Errorf("expected TLSHandshakeTimeout = 2s, got %v", transport.TLSHandshakeTimeout)
+	}
+}
+
+func TestUpdateFromRemote_RejectsUnsignedAndTamperedBundles(t *testing.T) {
+	eng, err := NewFingerprintEngine()
+	if err != nil {
+		t.Fatalf("NewFingerprintEngine failed: %v", err)
+	}
+
+	// 1. Missing X-Signature-Ed25519 header must be rejected (MITM protection)
+	unsignedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(embeddedOfflineSignatures)
+	}))
+	defer unsignedSrv.Close()
+
+	if err := eng.UpdateFromRemote(unsignedSrv.URL); err == nil || !strings.Contains(err.Error(), "missing X-Signature-Ed25519") {
+		t.Fatalf("expected missing signature error, got: %v", err)
+	}
+	if !eng.IsAirGapped {
+		t.Errorf("expected engine to remain in offline air-gapped state after rejected update")
+	}
+
+	// 2. Forged Ed25519 signature must be rejected
+	forgedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Signature-Ed25519", strings.Repeat("aa", 64))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(embeddedOfflineSignatures)
+	}))
+	defer forgedSrv.Close()
+
+	if err := eng.UpdateFromRemote(forgedSrv.URL); err == nil || !strings.Contains(err.Error(), "cryptographic signature verification failed") {
+		t.Fatalf("expected signature verification failure, got: %v", err)
 	}
 }
 

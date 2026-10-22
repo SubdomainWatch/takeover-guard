@@ -22,13 +22,6 @@ const (
 	PreviousPublicKeyHex = "84f183756d538e12b70f08be92ceb65f3f4e3c15f9adca08e82ef478c92a9532"
 )
 
-type LiveStatus struct {
-	IsVulnerable bool   `json:"is_vulnerable"`
-	Severity     string `json:"severity"`
-	Remediation  string `json:"remediation"`
-	Provider     string `json:"provider"`
-}
-
 type Fingerprint struct {
 	Provider         string            `json:"provider"`
 	CnamePatterns    []string          `json:"cname_patterns"`
@@ -63,9 +56,9 @@ func NewFingerprintEngine() (*FingerprintEngine, error) {
 	}, nil
 }
 
-func LoadOfflineSignatures() (*FingerprintBundle, error) {
+func parseAndCompileBundle(raw []byte) (*FingerprintBundle, error) {
 	var bundle FingerprintBundle
-	if err := json.Unmarshal(embeddedOfflineSignatures, &bundle); err != nil {
+	if err := json.Unmarshal(raw, &bundle); err != nil {
 		return nil, err
 	}
 
@@ -80,6 +73,10 @@ func LoadOfflineSignatures() (*FingerprintBundle, error) {
 	}
 
 	return &bundle, nil
+}
+
+func LoadOfflineSignatures() (*FingerprintBundle, error) {
+	return parseAndCompileBundle(embeddedOfflineSignatures)
 }
 
 // UpdateFromRemote attempts to download updated signatures and verify Ed25519 signature (§5.1).
@@ -123,22 +120,12 @@ func (e *FingerprintEngine) UpdateFromRemote(url string) error {
 		return fmt.Errorf("cryptographic signature verification failed for remote bundle")
 	}
 
-	var bundle FingerprintBundle
-	if err := json.Unmarshal(body, &bundle); err != nil {
+	bundle, err := parseAndCompileBundle(body)
+	if err != nil {
 		return err
 	}
 
-	for i := range bundle.Signatures {
-		sig := &bundle.Signatures[i]
-		for _, pat := range sig.CnamePatterns {
-			re, err := regexp.Compile("(?i)" + pat)
-			if err == nil {
-				sig.compiledPatterns = append(sig.compiledPatterns, re)
-			}
-		}
-	}
-
-	e.Bundle = &bundle
+	e.Bundle = bundle
 	e.IsAirGapped = false
 	return nil
 }

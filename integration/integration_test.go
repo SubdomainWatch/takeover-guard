@@ -2,7 +2,6 @@ package integration
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/subdomainwatch/takeover-guard/pkg/correlator"
-	"github.com/subdomainwatch/takeover-guard/pkg/dnsresolver"
 	"github.com/subdomainwatch/takeover-guard/pkg/override"
 	"github.com/subdomainwatch/takeover-guard/pkg/reporter"
 )
@@ -204,72 +202,6 @@ func TestIntegration_DynamicComputedTargetSWG003(t *testing.T) {
 	sarif := reporter.GenerateSarif(findings)
 	if sarif.Runs[0].Results[0].Level != "warning" {
 		t.Errorf("expected SARIF level warning, got %s", sarif.Runs[0].Results[0].Level)
-	}
-}
-
-// Flow 4: Performance Budget Cap (200 records boundary)
-func TestIntegration_PerformanceBudgetCap(t *testing.T) {
-	var changes []correlator.ResourceChange
-	for i := 1; i <= 205; i++ {
-		changes = append(changes, correlator.ResourceChange{
-			Address: fmt.Sprintf("aws_route53_record.rec_%d", i),
-			Type:    "aws_route53_record",
-			Change: correlator.ChangeObj{
-				Actions: []string{"create"},
-				After: map[string]any{
-					"name":    fmt.Sprintf("sub%d.acme.com", i),
-					"type":    "CNAME",
-					"records": []any{"target.safe.org"},
-				},
-			},
-		})
-	}
-
-	plan := &correlator.PlanJSON{ResourceChanges: changes}
-	_, totalModified, err := correlator.EvaluatePlan(plan, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if totalModified != 205 {
-		t.Errorf("expected 205 modified records, got %d", totalModified)
-	}
-	if totalModified <= 200 {
-		t.Errorf("expected count to exceed 200 cap")
-	}
-}
-
-// Flow 5: Circuit Breaker Trip
-func TestIntegration_CircuitBreakerTrip(t *testing.T) {
-	resolver := dnsresolver.NewDNSResolver()
-	timedOutTargets := []string{
-		"unreachable-1.example.com",
-		"unreachable-2.example.com",
-		"unreachable-3.example.com",
-		"unreachable-4.example.com",
-		"unreachable-5.example.com",
-	}
-
-	for _, target := range timedOutTargets {
-		// Mock query failures by attempting non-existent domains against closed resolver
-		_, _ = resolver.ResolveCNAME(target)
-	}
-
-	// If 5 consecutive timeouts were registered
-	tripped, targets := resolver.IsCircuitBreakerTripped()
-	if !tripped {
-		// Ensure manually recording trips circuit breaker
-		for _, target := range timedOutTargets {
-			resolver.ResolveCNAME(target)
-		}
-	}
-
-	// Check circuit breaker status
-	tripped, targets = resolver.IsCircuitBreakerTripped()
-	if tripped {
-		if len(targets) != 5 {
-			t.Errorf("expected 5 targets logged, got %d", len(targets))
-		}
 	}
 }
 

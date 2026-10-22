@@ -126,10 +126,8 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 		}
 
 		// If a non-blank, non-comment line appears before resource, invalidate pending ignore
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
-			if pendingEntry != nil {
-				return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at line %d rejected", filePath, lineNum, lastCommentLine)
-			}
+		if pendingEntry != nil && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
+			return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at line %d rejected", filePath, lineNum, lastCommentLine)
 		}
 	}
 
@@ -147,9 +145,7 @@ func (a *OverrideAuditor) ScanDirectory(dir string) error {
 			return nil
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".tf") {
-			if err := a.ScanFile(path); err != nil {
-				return err
-			}
+			return a.ScanFile(path)
 		}
 		return nil
 	})
