@@ -13,7 +13,7 @@ elif [ -f "${REPO_ROOT}/guard/bin/subdomainwatch-guard" ]; then
 elif command -v go >/dev/null 2>&1; then
     CACHE_BIN="${HOME}/.cache/subdomainwatch/bin/subdomainwatch-guard"
     mkdir -p "$(dirname "${CACHE_BIN}")"
-    if [ ! -f "${CACHE_BIN}" ] || [ "${REPO_ROOT}/guard/cmd/subdomainwatch-guard/main.go" -nt "${CACHE_BIN}" ]; then
+    if [ ! -f "${CACHE_BIN}" ] || [ -n "$(find "${REPO_ROOT}/guard" \( -name '*.go' -o -name '*.json' \) -newer "${CACHE_BIN}" -print -quit 2>/dev/null || true)" ]; then
         echo "⚙ Building subdomainwatch-guard local binary..." >&2
         (cd "${REPO_ROOT}/guard" && go build -o "${CACHE_BIN}" ./cmd/subdomainwatch-guard)
     fi
