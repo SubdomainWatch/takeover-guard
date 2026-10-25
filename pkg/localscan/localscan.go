@@ -226,7 +226,7 @@ func RunLocalEngine(ctx context.Context, opts LocalScanOptions) (*LocalScanResul
 
 	var activeFindings []correlator.Finding
 	for _, f := range findings {
-		ignored, _ := auditor.IsIgnored(f.RuleID, f.FQDN)
+		ignored, _ := auditor.IsIgnored(f.RuleID, f.FQDN, f.Address)
 		if !ignored {
 			activeFindings = append(activeFindings, f)
 		}

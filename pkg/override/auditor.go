@@ -55,7 +55,7 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 	lineNum := 0
 
 	var lastCommentLine int
-	var pendingEntry *IgnoreEntry
+	var pendingEntries []*IgnoreEntry
 
 	for scanner.Scan() {
 		lineNum++
@@ -79,9 +79,11 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 				return fmt.Errorf("%s:%d: invalid expires date format '%s' (expected YYYY-MM-DD)", filePath, lineNum, expiresStr)
 			}
 
+			expiresEndOfDay := expiresDate.Add(24*time.Hour - time.Nanosecond)
+
 			// Validate expiration policy (§9.2 & Gap 3 / P1-4):
 			// If expires <= today: log warning and do NOT suppress findings, but do NOT crash build
-			if !expiresDate.After(a.now) {
+			if !expiresEndOfDay.After(a.now) {
 				fmt.Fprintf(os.Stderr, "⚠ Override for %s expired on %s (file %s:%d) — override will not suppress findings\n", domain, expiresStr, filePath, lineNum)
 				continue
 			}
@@ -92,7 +94,7 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 				return fmt.Errorf("ERROR: Override for %s has expiration date %s exceeding the maximum 90-day policy (file %s:%d)", domain, expiresStr, filePath, lineNum)
 			}
 
-			pendingEntry = &IgnoreEntry{
+			pendingEntries = append(pendingEntries, &IgnoreEntry{
 				RuleID:   ruleID,
 				Domain:   domain,
 				Expires:  expiresDate,
@@ -100,14 +102,18 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 				Reason:   reason,
 				LineNum:  lineNum,
 				FilePath: filePath,
-			}
+			})
 			lastCommentLine = lineNum
 			continue
 		}
 
+		if strings.Contains(strings.ToLower(trimmed), "subdomainwatch-ignore") {
+			return fmt.Errorf("%s:%d: Malformed subdomainwatch-ignore directive. Expected: # subdomainwatch-ignore: <RULE_ID> domain=<fqdn> expires=<YYYY-MM-DD> approver=@<handle> reason=\"<justification>\"", filePath, lineNum)
+		}
+
 		// Check for resource block
 		if resMatch := resourceRegex.FindStringSubmatch(line); resMatch != nil {
-			if pendingEntry != nil {
+			if len(pendingEntries) > 0 {
 				// Line N-1 Proximity Binding (§9.1 & Refinement §3.4)
 				// Must be line N-1 or N-2 (allowing 0 to 1 blank lines)
 				diff := lineNum - lastCommentLine
@@ -117,22 +123,25 @@ func (a *OverrideAuditor) ScanFile(filePath string) error {
 
 				resType := resMatch[1]
 				resName := resMatch[2]
-				pendingEntry.TargetRes = fmt.Sprintf("%s.%s", resType, resName)
+				targetRes := fmt.Sprintf("%s.%s", resType, resName)
 
-				a.overrides[[2]string{pendingEntry.Domain, pendingEntry.RuleID}] = pendingEntry
-				pendingEntry = nil
+				for _, pe := range pendingEntries {
+					pe.TargetRes = targetRes
+					a.overrides[[2]string{pe.Domain, pe.RuleID}] = pe
+				}
+				pendingEntries = nil
 			}
 			continue
 		}
 
 		// If a non-blank, non-comment line appears before resource, invalidate pending ignore
-		if pendingEntry != nil && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
+		if len(pendingEntries) > 0 && trimmed != "" && !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "//") {
 			return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at line %d rejected", filePath, lineNum, lastCommentLine)
 		}
 	}
 
-	if pendingEntry != nil {
-		return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at end of file without matching resource", filePath, pendingEntry.LineNum)
+	if len(pendingEntries) > 0 {
+		return fmt.Errorf("%s:%d: Detached # subdomainwatch-ignore comment at end of file without matching resource", filePath, pendingEntries[0].LineNum)
 	}
 
 	return scanner.Err()
@@ -152,11 +161,16 @@ func (a *OverrideAuditor) ScanDirectory(dir string) error {
 }
 
 // IsIgnored checks if finding matches a valid active override
-func (a *OverrideAuditor) IsIgnored(ruleID, fqdn string) (bool, *IgnoreEntry) {
+func (a *OverrideAuditor) IsIgnored(ruleID, fqdn string, address ...string) (bool, *IgnoreEntry) {
 	norm := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(fqdn), "."))
 	entry, exists := a.overrides[[2]string{norm, ruleID}]
 	if !exists {
 		return false, nil
+	}
+	if len(address) > 0 && address[0] != "" && entry.TargetRes != "" {
+		if !strings.EqualFold(entry.TargetRes, address[0]) {
+			return false, nil
+		}
 	}
 	return true, entry
 }

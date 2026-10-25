@@ -152,7 +152,7 @@ func GenerateSarif(findings []correlator.Finding) *SarifReport {
 				},
 			},
 		}
-		lineHash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s", f.RuleID, f.FQDN, f.Target)))
+		lineHash := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%s", f.RuleID, f.Address, f.FQDN, f.Target)))
 		res.PartialFingerprints = map[string]string{
 			"primaryLocationLineHash": hex.EncodeToString(lineHash[:]),
 		}

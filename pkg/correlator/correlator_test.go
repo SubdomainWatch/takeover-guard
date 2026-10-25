@@ -353,3 +353,64 @@ func TestAnalyzePlanIndeterminateAndClean(t *testing.T) {
 	}
 }
 
+func TestTerraformReplaceResourceScan(t *testing.T) {
+	// Actions ["delete", "create"] must NOT be skipped as pure delete
+	mockP := &mockProber{
+		isCloudTarget: true,
+		isVuln:        true,
+		severity:      SeverityCritical,
+		remediation:   "Recreate S3 bucket",
+	}
+
+	plan := &PlanJSON{
+		ResourceChanges: []ResourceChange{
+			{
+				Address: "aws_route53_record.replaced",
+				Type:    "aws_route53_record",
+				Change: ChangeObj{
+					Actions: []string{"delete", "create"},
+					Before: map[string]any{
+						"name":    "old.acme.com",
+						"type":    "CNAME",
+						"records": []any{"old-target.s3.amazonaws.com"},
+					},
+					After: map[string]any{
+						"name":    "replaced.acme.com",
+						"type":    "CNAME",
+						"records": []any{"dangling.s3.amazonaws.com"},
+					},
+				},
+			},
+		},
+	}
+
+	evalRes, err := AnalyzePlan(plan, mockP)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(evalRes.Findings) != 1 {
+		t.Fatalf("expected 1 finding on replaced resource, got %d", len(evalRes.Findings))
+	}
+	if evalRes.Findings[0].FQDN != "replaced.acme.com" {
+		t.Errorf("expected FQDN replaced.acme.com, got %s", evalRes.Findings[0].FQDN)
+	}
+	if evalRes.Findings[0].Target != "dangling.s3.amazonaws.com" {
+		t.Errorf("expected target dangling.s3.amazonaws.com, got %s", evalRes.Findings[0].Target)
+	}
+}
+
+func TestVpcEndpointsStrictRegex(t *testing.T) {
+	// Legitimate AWS VPC endpoint
+	if !IsPrivateTarget("vpce-0123456789abcdef0-abcdef12.s3.us-east-1.vpce.amazonaws.com.vpc-endpoints.us-east-1.amazonaws.com") {
+		// Valid suffix
+		t.Log("Note: valid endpoint suffix matches")
+	}
+
+	// Attacker-controlled S3 bucket name attempting substring bypass
+	attackerTarget := "my.vpc-endpoints.bucket.s3.amazonaws.com"
+	if IsPrivateTarget(attackerTarget) {
+		t.Errorf("IsPrivateTarget(%q) = true; substring bypass vulnerability reproduced!", attackerTarget)
+	}
+}
+

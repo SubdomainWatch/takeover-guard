@@ -3,7 +3,7 @@ package correlator
 import (
 	"encoding/json"
 	"fmt"
-	"net"
+	"net/netip"
 	"regexp"
 	"strings"
 )
@@ -21,6 +21,23 @@ var (
 	bitbucketPattern = regexp.MustCompile(`^([a-z0-9-]+)\.bitbucket\.io$`)
 	ghostPattern     = regexp.MustCompile(`^([a-z0-9-]+)\.ghost\.io$`)
 	flyPattern       = regexp.MustCompile(`^([a-z0-9-]+)\.(?:edgeapp\.net|fly\.dev)$`)
+	vpcEndpointRegex = regexp.MustCompile(`\.vpc-endpoints\.[a-z0-9-]+\.amazonaws\.com$`)
+
+	nonPublicPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("0.0.0.0/8"),
+		netip.MustParsePrefix("100.64.0.0/10"),     // RFC 6598 CGNAT
+		netip.MustParsePrefix("169.254.0.0/16"),    // RFC 3927 Link-Local / AWS IMDSv1/v2
+		netip.MustParsePrefix("192.0.0.0/24"),      // RFC 6890
+		netip.MustParsePrefix("192.0.2.0/24"),      // RFC 5737 TEST-NET-1
+		netip.MustParsePrefix("198.18.0.0/15"),     // RFC 2544 Benchmarking
+		netip.MustParsePrefix("198.51.100.0/24"),   // RFC 5737 TEST-NET-2
+		netip.MustParsePrefix("203.0.113.0/24"),    // RFC 5737 TEST-NET-3
+		netip.MustParsePrefix("240.0.0.0/4"),       // RFC 1112 Reserved
+		netip.MustParsePrefix("fd00:ec2::254/128"), // AWS IMDSv6
+		netip.MustParsePrefix("2001:db8::/32"),     // RFC 3849 Documentation
+		netip.MustParsePrefix("64:ff9b::/96"),      // RFC 6052 NAT64
+		netip.MustParsePrefix("64:ff9b:1::/48"),    // RFC 8215 NAT64
+	}
 )
 
 type DnsRecordEntry struct {
@@ -89,16 +106,22 @@ func ExtractCloudTargetIdentity(target string) (provider, identifier string) {
 // IsPrivateTarget checks if target is RFC 1918 or internal VPC endpoint (§6.1)
 func IsPrivateTarget(target string) bool {
 	norm := NormalizeDomain(target)
-	if strings.Contains(norm, ".vpc-endpoints.") ||
+	if vpcEndpointRegex.MatchString(norm) ||
 		strings.HasSuffix(norm, ".internal") ||
 		strings.HasSuffix(norm, ".local") {
 		return true
 	}
 
-	ip := net.ParseIP(norm)
-	if ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+	if addr, err := netip.ParseAddr(norm); err == nil {
+		addr = addr.Unmap()
+		if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+			addr.IsLinkLocalMulticast() || addr.IsMulticast() || addr.IsUnspecified() {
 			return true
+		}
+		for _, pfx := range nonPublicPrefixes {
+			if pfx.Contains(addr) {
+				return true
+			}
 		}
 	}
 	return false
@@ -151,28 +174,27 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		afterUnknown := change.Change.AfterUnknown
 		address := change.Address
 
-		isDelete := containsAction(actions, "delete")
 		isCreate := containsAction(actions, "create")
 		isUpdate := containsAction(actions, "update")
 		isNoOp := containsAction(actions, "no-op") || len(actions) == 0
+		// A Terraform replacement has actions ["delete", "create"] or ["create", "delete"].
+		// Only treat as pure delete when "create" is not also present; otherwise inspect both before/after.
+		isPureDelete := containsAction(actions, "delete") && !isCreate
 
 		// -------------------------------------------------------------
 		// 1. AWS S3 BUCKET LIFECYCLE (Supports for_each and modules)
 		// -------------------------------------------------------------
 		if rtype == "aws_s3_bucket" {
-			bucketName := getString(before, "bucket")
-			if bucketName == "" {
-				bucketName = getString(before, "id")
+			if containsAction(actions, "delete") {
+				bBefore := strings.ToLower(strings.TrimSpace(firstNonEmpty(getString(before, "bucket"), getString(before, "id"))))
+				if bBefore != "" {
+					addResource(deletedCloudResources, "s3", bBefore)
+				}
 			}
-			if bucketName == "" {
-				bucketName = getString(after, "bucket")
-			}
-			if bucketName != "" {
-				bucketName = strings.ToLower(strings.TrimSpace(bucketName))
-				if isDelete {
-					addResource(deletedCloudResources, "s3", bucketName)
-				} else if isCreate || isNoOp || isUpdate {
-					addResource(activeCloudResources, "s3", bucketName)
+			if isCreate || isUpdate || isNoOp {
+				bAfter := strings.ToLower(strings.TrimSpace(firstNonEmpty(getString(after, "bucket"), getString(after, "id"), getString(before, "bucket"))))
+				if bAfter != "" {
+					addResource(activeCloudResources, "s3", bAfter)
 				}
 			}
 		}
@@ -181,15 +203,15 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		// 2. HEROKU APP LIFECYCLE
 		// -------------------------------------------------------------
 		if rtype == "heroku_app" {
-			appName := getString(before, "name")
-			if appName == "" {
-				appName = getString(after, "name")
-			}
-			if appName != "" {
-				appName = strings.ToLower(strings.TrimSpace(appName))
-				if isDelete {
+			if containsAction(actions, "delete") {
+				appName := strings.ToLower(strings.TrimSpace(getString(before, "name")))
+				if appName != "" {
 					addResource(deletedCloudResources, "heroku", appName)
-				} else {
+				}
+			}
+			if isCreate || isUpdate || isNoOp {
+				appName := strings.ToLower(strings.TrimSpace(firstNonEmpty(getString(after, "name"), getString(before, "name"))))
+				if appName != "" {
 					addResource(activeCloudResources, "heroku", appName)
 				}
 			}
@@ -201,9 +223,9 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		if rtype == "aws_route53_record" {
 			totalModifiedDnsRecords++
 
-			recordName := getString(before, "name")
-			if recordName == "" {
-				recordName = getString(after, "name")
+			recordName := getString(after, "name")
+			if isPureDelete || recordName == "" {
+				recordName = getString(before, "name")
 			}
 			fqdn := NormalizeDomain(recordName)
 
@@ -223,15 +245,15 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 			var target string
 
 			// Case A: Standard CNAME
-			recType := getString(before, "type")
-			if recType == "" {
-				recType = getString(after, "type")
+			recType := getString(after, "type")
+			if isPureDelete || recType == "" {
+				recType = getString(before, "type")
 			}
 
 			if strings.EqualFold(recType, "CNAME") {
-				rawRecords := getSlice(before, "records")
-				if !isDelete {
-					rawRecords = getSlice(after, "records")
+				rawRecords := getSlice(after, "records")
+				if isPureDelete {
+					rawRecords = getSlice(before, "records")
 				}
 				if len(rawRecords) > 0 {
 					target = NormalizeDomain(fmt.Sprint(rawRecords[0]))
@@ -240,9 +262,9 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 
 			// Case B: Route53 ALIAS (CloudFront or S3 Website)
 			// S3 Website uses 'name', CloudFront uses 'dns_name'
-			aliasData := getMapOrSliceMap(before, "alias")
-			if !isDelete {
-				aliasData = getMapOrSliceMap(after, "alias")
+			aliasData := getMapOrSliceMap(after, "alias")
+			if isPureDelete {
+				aliasData = getMapOrSliceMap(before, "alias")
 			}
 			if aliasData != nil {
 				rawAliasTarget := getString(aliasData, "dns_name")
@@ -255,10 +277,10 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 			}
 
 			if fqdn != "" && target != "" {
-				if isDelete {
+				if isPureDelete {
 					deletedDnsRecords[fqdn] = target
 				} else {
-					activeDnsRecords[fqdn] = DnsRecordEntry{
+					activeDnsRecords[address] = DnsRecordEntry{
 						FQDN:       fqdn,
 						Target:     target,
 						Address:    address,
@@ -274,9 +296,9 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		if rtype == "cloudflare_record" {
 			totalModifiedDnsRecords++
 
-			recordName := getString(before, "name")
-			if recordName == "" {
-				recordName = getString(after, "name")
+			recordName := getString(after, "name")
+			if isPureDelete || recordName == "" {
+				recordName = getString(before, "name")
 			}
 			fqdn := NormalizeDomain(recordName)
 
@@ -292,22 +314,22 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 				continue
 			}
 
-			content := getString(before, "content")
-			if !isDelete {
-				content = getString(after, "content")
+			content := getString(after, "content")
+			if isPureDelete {
+				content = getString(before, "content")
 			}
 
-			recType := getString(before, "type")
-			if recType == "" {
-				recType = getString(after, "type")
+			recType := getString(after, "type")
+			if isPureDelete || recType == "" {
+				recType = getString(before, "type")
 			}
 
 			if fqdn != "" && content != "" {
 				target := NormalizeDomain(content)
-				if isDelete {
+				if isPureDelete {
 					deletedDnsRecords[fqdn] = target
 				} else {
-					activeDnsRecords[fqdn] = DnsRecordEntry{
+					activeDnsRecords[address] = DnsRecordEntry{
 						FQDN:       fqdn,
 						Target:     target,
 						Address:    address,
@@ -322,20 +344,20 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		// -------------------------------------------------------------
 		if rtype == "azurerm_dns_cname_record" {
 			totalModifiedDnsRecords++
-			fqdn := azureRecordFQDN(before)
-			if fqdn == "" {
-				fqdn = azureRecordFQDN(after)
+			fqdn := azureRecordFQDN(after)
+			if isPureDelete || fqdn == "" {
+				fqdn = azureRecordFQDN(before)
 			}
-			target := getString(before, "record")
-			if !isDelete {
-				target = getString(after, "record")
+			target := getString(after, "record")
+			if isPureDelete {
+				target = getString(before, "record")
 			}
 			target = NormalizeDomain(target)
 			if fqdn != "" && target != "" {
-				if isDelete {
+				if isPureDelete {
 					deletedDnsRecords[fqdn] = target
 				} else {
-					activeDnsRecords[fqdn] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: "CNAME"}
+					activeDnsRecords[address] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: "CNAME"}
 				}
 			}
 		}
@@ -344,27 +366,27 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 		// 6. GOOGLE CLOUD DNS CNAME RECORD LIFECYCLE
 		// -------------------------------------------------------------
 		if rtype == "google_dns_record_set" {
-			recType := getString(before, "type")
-			if recType == "" {
-				recType = getString(after, "type")
+			recType := getString(after, "type")
+			if isPureDelete || recType == "" {
+				recType = getString(before, "type")
 			}
 			if strings.EqualFold(recType, "CNAME") {
 				totalModifiedDnsRecords++
-				name := getString(before, "name")
-				if name == "" {
-					name = getString(after, "name")
+				name := getString(after, "name")
+				if isPureDelete || name == "" {
+					name = getString(before, "name")
 				}
 				fqdn := NormalizeDomain(name)
 				values := getSlice(after, "rrdatas")
-				if isDelete {
+				if isPureDelete {
 					values = getSlice(before, "rrdatas")
 				}
 				if fqdn != "" && len(values) > 0 {
 					target := NormalizeDomain(fmt.Sprint(values[0]))
-					if isDelete {
+					if isPureDelete {
 						deletedDnsRecords[fqdn] = target
 					} else {
-						activeDnsRecords[fqdn] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: recType}
+						activeDnsRecords[address] = DnsRecordEntry{FQDN: fqdn, Target: target, Address: address, RecordType: recType}
 					}
 				}
 			}
@@ -374,20 +396,21 @@ func AnalyzePlan(plan *PlanJSON, prober ProberInterface) (*EvaluationResult, err
 	// -----------------------------------------------------------------
 	// 5. CORRELATION EVALUATION
 	// -----------------------------------------------------------------
-	for fqdn, entry := range activeDnsRecords {
+	for _, entry := range activeDnsRecords {
+		fqdn := entry.FQDN
 		target := entry.Target
 		provider, identifier := ExtractCloudTargetIdentity(target)
-
-		// Rule 1: Coordinated Deletion Check
-		// If DNS record is also deleted with the same target, safe
-		if delTarget, exists := deletedDnsRecords[fqdn]; exists && delTarget == target {
-			continue
-		}
 
 		// Rule 2: Uncoordinated Resource Orphan (Same-PR Bug)
 		if provider != "" {
 			if deletedSet, exists := deletedCloudResources[provider]; exists {
 				if _, isDeleted := deletedSet[identifier]; isDeleted {
+					// Check if resource is also active/recreated in this plan
+					if activeSet, exists := activeCloudResources[provider]; exists {
+						if _, isRecreated := activeSet[identifier]; isRecreated {
+							continue // Recreated in this plan
+						}
+					}
 					findings = append(findings, Finding{
 						RuleID:   RuleUncoordinatedOrphan,
 						Severity: SeverityCritical,
@@ -544,4 +567,13 @@ func getMapOrSliceMap(m map[string]any, key string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

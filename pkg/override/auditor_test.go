@@ -77,6 +77,18 @@ func TestOverrideAuditorScenarios(t *testing.T) {
 			content:    "# subdomainwatch-ignore: SW-G-001 domain=staging.acme.com expires=2027-01-01 approver=@sec-ops reason=\"Too far out\"\n" + resBlock,
 			wantErrSub: "90-day",
 		},
+		{
+			name:       "malformed directive fails closed",
+			content:    "# subdomainwatch-ignore: SW-G-001 expires=2026-10-15 domain=staging.acme.com approver=@sec-ops\n" + resBlock,
+			wantErrSub: "Malformed subdomainwatch-ignore directive",
+		},
+		{
+			name: "stacked overrides above single resource both register",
+			content: "# subdomainwatch-ignore: SW-G-001 domain=staging.acme.com expires=2026-10-15 approver=@sec-ops reason=\"Rule 1\"\n" +
+				"# subdomainwatch-ignore: SW-G-002 domain=staging.acme.com expires=2026-10-15 approver=@sec-ops reason=\"Rule 2\"\n" + resBlock,
+			wantIgnored: true,
+			wantApprove: "@sec-ops",
+		},
 	}
 
 	for _, tc := range cases {

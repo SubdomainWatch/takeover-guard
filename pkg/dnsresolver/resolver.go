@@ -82,6 +82,16 @@ func (r *DNSResolver) ResolveCNAME(domain string) ([]string, error) {
 			lastErr = err
 			continue
 		}
+		if in.Truncated {
+			tcpClient := &dns.Client{Timeout: r.timeout, Net: "tcp"}
+			if tcpIn, _, tcpErr := tcpClient.Exchange(m, ns); tcpErr == nil {
+				in = tcpIn
+			}
+		}
+		if in.Rcode != dns.RcodeSuccess && in.Rcode != dns.RcodeNameError {
+			lastErr = fmt.Errorf("upstream %s returned rcode %s", ns, dns.RcodeToString[in.Rcode])
+			continue
+		}
 		resp = in
 		break
 	}
@@ -97,7 +107,7 @@ func (r *DNSResolver) ResolveCNAME(domain string) ([]string, error) {
 	// Verify 0x20 casing in answer question (§2.2)
 	if len(resp.Question) > 0 {
 		respQ := resp.Question[0].Name
-		if !strings.EqualFold(respQ, randomized) {
+		if respQ != randomized {
 			return nil, fmt.Errorf("dns 0x20 case validation failed: query %s != resp %s", randomized, respQ)
 		}
 	}

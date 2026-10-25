@@ -162,7 +162,7 @@ func main() {
 		}
 
 		for _, f := range findings {
-			ignored, entry := auditor.IsIgnored(f.RuleID, f.FQDN)
+			ignored, entry := auditor.IsIgnored(f.RuleID, f.FQDN, f.Address)
 			if ignored && entry != nil {
 				fmt.Printf("ℹ Override applied for %s (%s) approved by %s until %s (Reason: %s)\n",
 					f.FQDN, f.RuleID, entry.Approver, entry.Expires.Format("2006-01-02"), entry.Reason)
