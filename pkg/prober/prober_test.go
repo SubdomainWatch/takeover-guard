@@ -228,4 +228,3 @@ func TestUpdateFromRemote_RejectsUnsignedAndTamperedBundles(t *testing.T) {
 		t.Fatalf("expected signature verification failure, got: %v", err)
 	}
 }
-

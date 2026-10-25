@@ -413,4 +413,3 @@ func TestVpcEndpointsStrictRegex(t *testing.T) {
 		t.Errorf("IsPrivateTarget(%q) = true; substring bypass vulnerability reproduced!", attackerTarget)
 	}
 }
-

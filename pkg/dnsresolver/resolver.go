@@ -156,4 +156,3 @@ func (r *DNSResolver) IsCircuitBreakerTripped() (bool, []string) {
 	defer r.cbLock.Unlock()
 	return r.isTripped, r.timedOutTargets
 }
-

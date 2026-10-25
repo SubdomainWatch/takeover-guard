@@ -354,4 +354,3 @@ func (m *mockProbeTransport) RoundTrip(req *http.Request) (*http.Response, error
 func newMockProbeTransport(status string) http.RoundTripper {
 	return &mockProbeTransport{status: status}
 }
-

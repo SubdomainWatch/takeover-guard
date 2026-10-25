@@ -85,4 +85,3 @@ type DetailedProber interface {
 	ProberInterface
 	ProbeClaimabilityDetailed(fqdn, target string) (status ProbeStatus, severity string, remediation string, errReason string)
 }
-

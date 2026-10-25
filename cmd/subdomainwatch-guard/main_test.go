@@ -187,5 +187,3 @@ func TestCLIExitOneOnConfirmedFindingInClosedMode(t *testing.T) {
 		t.Fatalf("expected exit 0 for fail-mode=open with confirmed finding, got %v\nOutput: %s", errOpen, string(outOpen))
 	}
 }
-
-
