@@ -14,14 +14,14 @@ RUN go mod download
 # Copy source code and embedded assets
 COPY . ./
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.version=2.2.1" -o /bin/subdomainwatch-guard ./cmd/subdomainwatch-guard
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.version=2.3.0" -o /bin/subdomainwatch-guard ./cmd/subdomainwatch-guard
 
 # Stage 2: Hardened Rootless Runtime Container (§2.1)
 FROM alpine:3.20
 
 LABEL org.opencontainers.image.title="SubdomainWatch Takeover Guard" \
       org.opencontainers.image.description="Shift-Left IaC Security Gate & Post-Apply Sentinel" \
-      org.opencontainers.image.version="2.2.1" \
+      org.opencontainers.image.version="2.3.0" \
       org.opencontainers.image.vendor="SubdomainWatch" \
       org.opencontainers.image.source="https://github.com/SubdomainWatch/takeover-guard"
 

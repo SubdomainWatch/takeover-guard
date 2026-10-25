@@ -3,8 +3,8 @@
 > Prevent subdomain takeovers before merge. Detect dangling DNS and orphan cloud resources in Terraform PRs with active authoritative verification.
 
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-Marketplace-red?logo=github)](https://github.com/marketplace/actions/subdomainwatch-takeover-guard)
-[![Release: v2.2.0](https://img.shields.io/badge/release-v2.2.0-blue.svg)](https://github.com/SubdomainWatch/takeover-guard/releases/tag/v2.2.0)
-[![Docker: v2.2.0](https://img.shields.io/badge/docker-v2.2.0-blue?logo=docker)](https://github.com/SubdomainWatch/takeover-guard/pkgs/container/takeover-guard)
+[![Release: v2.3.0](https://img.shields.io/badge/release-v2.3.0-blue.svg)](https://github.com/SubdomainWatch/takeover-guard/releases/tag/v2.3.0)
+[![Docker: v2.3.0](https://img.shields.io/badge/docker-v2.3.0-blue?logo=docker)](https://github.com/SubdomainWatch/takeover-guard/pkgs/container/takeover-guard)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-blue)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](LICENSE)
 
@@ -75,7 +75,7 @@ Scan Terraform configuration directly without requiring `terraform init`, cloud 
 subdomainwatch-guard --tf-dir .
 
 # Via Docker (rootless container)
-docker run --rm -v $(pwd):/workspace ghcr.io/subdomainwatch/takeover-guard:v2.2.0 --tf-dir /workspace
+docker run --rm -v $(pwd):/workspace ghcr.io/subdomainwatch/takeover-guard:v2.3.0 --tf-dir /workspace
 ```
 
 ### B. Terraform Plan JSON Scanning (`--plan-file` / `--plan`)
@@ -92,7 +92,7 @@ subdomainwatch-guard --plan tfplan.json
 # or: subdomainwatch-guard --plan-file tfplan.json
 
 # Via Docker
-docker run --rm -v $(pwd):/workspace ghcr.io/subdomainwatch/takeover-guard:v2.2.0 --plan /workspace/tfplan.json
+docker run --rm -v $(pwd):/workspace ghcr.io/subdomainwatch/takeover-guard:v2.3.0 --plan /workspace/tfplan.json
 ```
 
 ### C. Pre-Commit Hook Integration
@@ -101,7 +101,7 @@ Add Takeover Guard to your `.pre-commit-config.yaml` to prevent committing dangl
 ```yaml
 repos:
   - repo: https://github.com/SubdomainWatch/takeover-guard
-    rev: v2.2.0
+    rev: v2.3.0
     hooks:
       - id: takeover-guard
         args:
