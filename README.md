@@ -7,6 +7,7 @@
 [![Docker: v2.3.0](https://img.shields.io/badge/docker-v2.3.0-blue?logo=docker)](https://github.com/SubdomainWatch/takeover-guard/pkgs/container/takeover-guard)
 [![SARIF 2.1.0](https://img.shields.io/badge/SARIF-2.1.0-blue)](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 [![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](LICENSE)
+[![Download takeover-guard - Subdomain Takeover Scan](https://a.fsdn.com/con/app/sf-download-button)](https://sourceforge.net/projects/takeover-guard/files/latest/download)
 
 ---
 
